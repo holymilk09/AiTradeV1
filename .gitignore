@@ -20,9 +20,10 @@ build/
 htmlcov/
 coverage.xml
 
-# Data + runtime
-data/
-logs/
+# Data + runtime — root-scoped so src/aitrade/data/ and src/aitrade/logging/
+# aren't accidentally excluded.
+/data/
+/logs/
 notebooks/.ipynb_checkpoints/
 *.sqlite
 *.db
