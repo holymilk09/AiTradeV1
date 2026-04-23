@@ -230,5 +230,110 @@ def strategies() -> None:
         console.print(f"- {name}")
 
 
+@app.command("smoke-trade")
+def smoke_trade(
+    symbol: str = typer.Option("AAPL", "--symbol", "-s"),
+    qty: float = typer.Option(1.0, "--qty", help="Shares to buy then sell"),
+    hold_secs: int = typer.Option(5, "--hold-secs", help="Seconds to hold before closing"),
+) -> None:
+    """Place a visible paper scalp (BUY market -> hold -> SELL market).
+
+    Meant for sanity-checking the end-to-end pipeline: you should see the
+    order and fill appear on the Alpaca paper dashboard and in the JSONL
+    trade journal. Defaults are tiny; the risk gate still runs.
+    """
+    import time
+
+    from aitrade.brokers.alpaca import build_client
+    from aitrade.data.alpaca_data import AlpacaDataClient
+    from aitrade.data.models import Timeframe
+    from aitrade.execution.executor import Executor
+    from aitrade.execution.orders import OrderRequest, OrderType, Side, TimeInForce
+    from aitrade.execution.risk import RiskGate
+    from aitrade.logging.trade_logger import TradeLogger
+
+    s = get_settings()
+    configure_logging(s.aitrade_log_dir, s.aitrade_log_level)
+
+    broker = build_client()  # paper by default
+    if not broker.is_paper:
+        console.print("[red]Refusing smoke-trade on a non-paper broker.[/red]")
+        raise typer.Exit(code=1)
+
+    data = AlpacaDataClient(s)
+    df = data.fetch_stock_bars(
+        symbol,
+        Timeframe.MIN_1,
+        datetime.now(UTC) - timedelta(days=5),
+        datetime.now(UTC),
+        use_cache=False,
+    )
+    if df.empty:
+        console.print(f"[yellow]No recent bars for {symbol} — can't size risk check.[/yellow]")
+        raise typer.Exit(code=1)
+    reference_price = float(df["close"].iloc[-1])
+
+    risk = RiskGate(
+        max_position_usd=s.aitrade_max_position_usd,
+        max_daily_loss_usd=s.aitrade_max_daily_loss_usd,
+        max_orders_per_min=s.aitrade_max_orders_per_min,
+        kill_switch_path=Path("KILL_SWITCH"),
+    )
+    exe = Executor(broker, risk)
+
+    with TradeLogger(log_dir=s.aitrade_log_dir, strategy_id="smoke_trade") as journal:
+        buy = OrderRequest(
+            symbol=symbol,
+            side=Side.BUY,
+            qty=qty,
+            order_type=OrderType.MARKET,
+            time_in_force=TimeInForce.DAY,
+            strategy_id="smoke_trade",
+        )
+        console.print(f"[cyan]BUY  {qty} {symbol} @ market (ref={reference_price:.2f})[/cyan]")
+        journal.log_submit(buy)
+        r1 = exe.submit(buy, reference_price=reference_price)
+        if not r1.accepted:
+            console.print(f"[red]BUY blocked:[/red] {r1.reason}")
+            journal.log_risk_block(buy, r1.reason)
+            raise typer.Exit(code=1)
+        if r1.ack:
+            journal.log_ack(buy, r1.ack)
+            console.print(
+                f"[green]BUY ack:[/green] "
+                f"broker_id={r1.ack.broker_order_id} status={r1.ack.status.value}"
+            )
+
+        console.print(f"[dim]holding for {hold_secs}s…[/dim]")
+        time.sleep(hold_secs)
+
+        sell = OrderRequest(
+            symbol=symbol,
+            side=Side.SELL,
+            qty=qty,
+            order_type=OrderType.MARKET,
+            time_in_force=TimeInForce.DAY,
+            strategy_id="smoke_trade",
+        )
+        console.print(f"[cyan]SELL {qty} {symbol} @ market[/cyan]")
+        journal.log_submit(sell)
+        r2 = exe.submit(sell, reference_price=reference_price, current_position_qty=qty)
+        if not r2.accepted:
+            console.print(f"[red]SELL blocked:[/red] {r2.reason}")
+            journal.log_risk_block(sell, r2.reason)
+            raise typer.Exit(code=1)
+        if r2.ack:
+            journal.log_ack(sell, r2.ack)
+            console.print(
+                f"[green]SELL ack:[/green] "
+                f"broker_id={r2.ack.broker_order_id} status={r2.ack.status.value}"
+            )
+
+        console.print(
+            f"\n[green]done[/green]  run_id={journal.run_id}  "
+            f"(see Alpaca paper dashboard + logs/trades.jsonl)"
+        )
+
+
 if __name__ == "__main__":
     app()
