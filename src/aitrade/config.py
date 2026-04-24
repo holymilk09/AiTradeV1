@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     aitrade_reasoner_model: str = Field(default="claude-opus-4-7")
     aitrade_reasoner_min_gap_secs: int = Field(default=300, gt=0)
 
+    # Phase 1 — signal engine
+    aitrade_engine_interval_secs: int = Field(default=900, gt=0)  # 15 min
+    aitrade_discovery_top_n: int = Field(default=20, gt=0)
+    aitrade_market_snapshot_ttl_secs: int = Field(default=30, gt=0)
+    aitrade_market_snapshot_max_stale_secs: int = Field(default=300, gt=0)
+
     @property
     def has_credentials(self) -> bool:
         return bool(
