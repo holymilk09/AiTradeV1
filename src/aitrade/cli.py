@@ -409,5 +409,214 @@ def chat() -> None:
     )
 
 
+@app.command("discover")
+def discover_cmd(
+    top_n: int = typer.Option(20, "--top-n", "-n", help="Top N tickers to surface"),
+) -> None:
+    """One-shot dump of the current buzz-driven candidate board.
+
+    Useful for sanity-checking discovery before running the full engine.
+    Calls Claude with web_search; costs a small number of input tokens.
+    """
+    from aitrade.discovery.agent import DiscoveryAgent
+    from aitrade.discovery.extractor import TickerExtractor, load_alpaca_active_equities
+    from aitrade.discovery.scorer import BuzzScorer
+
+    s = get_settings()
+    configure_logging(s.aitrade_log_dir, s.aitrade_log_level)
+    if not s.anthropic_api_key.get_secret_value():
+        console.print("[red]ANTHROPIC_API_KEY missing.[/red] Add it to .env.")
+        raise typer.Exit(code=1)
+    if not s.has_credentials:
+        console.print("[red]Alpaca credentials missing.[/red] Needed for ticker validation.")
+        raise typer.Exit(code=1)
+
+    valid = load_alpaca_active_equities(s)
+    extractor = TickerExtractor(valid_tickers=valid)
+    scorer = BuzzScorer()
+    agent = DiscoveryAgent(settings=s, extractor=extractor, scorer=scorer)
+
+    tickers = agent.discover(top_n=top_n)
+    if not tickers:
+        console.print("[yellow]No tickers surfaced this cycle.[/yellow]")
+        return
+
+    t = Table(title=f"Discovered tickers (top {len(tickers)})")
+    for col in ["symbol", "buzz", "mentions", "src_w", "age_min", "snippet"]:
+        t.add_column(col)
+    for d in tickers:
+        snippet = d.evidence[0][:50] + "…" if d.evidence else "-"
+        t.add_row(
+            d.symbol,
+            f"{d.buzz_score:.3f}",
+            str(d.mention_count),
+            f"{d.source_weight:.2f}",
+            f"{d.recency_minutes:.1f}",
+            snippet,
+        )
+    console.print(t)
+
+
+@app.command("engine-paper")
+def engine_paper(
+    duration: str = typer.Option(
+        "1h", "--duration", "-d", help="e.g. 30m, 2h — bot runs for this long"
+    ),
+    cycle_secs: int | None = typer.Option(
+        None,
+        "--cycle-secs",
+        help="Override cycle interval (default from AITRADE_ENGINE_INTERVAL_SECS).",
+    ),
+    top_n: int | None = typer.Option(
+        None, "--top-n", help="Override discovery top-N (default from env)."
+    ),
+    target_notional: float = typer.Option(
+        2_000.0, "--notional", help="Target USD per trade. Capped by RiskGate."
+    ),
+) -> None:
+    """Run the full Phase-1 signal engine in paper mode.
+
+    Each cycle: discover trending tickers → scan multi-TF patterns → rank
+    candidates → Claude floor-trader picks one (or passes) → risk gate →
+    Alpaca paper. Every event lands in the trade journal; round-trips are
+    reconciled after each cycle for Phase-1.5 experience replay.
+    """
+    from aitrade.bots.engine_runner import EngineConfig, run_engine
+    from aitrade.brokers.alpaca import build_client
+    from aitrade.data.alpaca_data import AlpacaDataClient
+    from aitrade.discovery.agent import DiscoveryAgent
+    from aitrade.discovery.extractor import TickerExtractor, load_alpaca_active_equities
+    from aitrade.discovery.scorer import BuzzScorer
+    from aitrade.execution.executor import Executor
+    from aitrade.execution.risk import RiskGate
+    from aitrade.journal.round_trips import RoundTripReconciler
+    from aitrade.logging.trade_logger import TradeLogger
+    from aitrade.market.snapshot import MarketSnapshotFetcher
+    from aitrade.reasoning.floor_trader import FloorTraderReasoner
+
+    s = get_settings()
+    configure_logging(s.aitrade_log_dir, s.aitrade_log_level)
+    if not s.anthropic_api_key.get_secret_value():
+        console.print("[red]ANTHROPIC_API_KEY missing.[/red] Add it to .env.")
+        raise typer.Exit(code=1)
+    if not s.has_credentials:
+        console.print("[red]Alpaca credentials missing.[/red] Add them to .env.")
+        raise typer.Exit(code=1)
+
+    broker = build_client()  # paper by default
+    data = AlpacaDataClient(s)
+    risk = RiskGate(
+        max_position_usd=s.aitrade_max_position_usd,
+        max_daily_loss_usd=s.aitrade_max_daily_loss_usd,
+        max_orders_per_min=s.aitrade_max_orders_per_min,
+        kill_switch_path=Path("KILL_SWITCH"),
+    )
+    exe = Executor(broker, risk)
+
+    valid = load_alpaca_active_equities(s)
+    extractor = TickerExtractor(valid_tickers=valid)
+    scorer = BuzzScorer()
+    discovery_agent = DiscoveryAgent(settings=s, extractor=extractor, scorer=scorer)
+
+    market_fetcher = MarketSnapshotFetcher(
+        data,
+        ttl_secs=s.aitrade_market_snapshot_ttl_secs,
+        max_stale_secs=s.aitrade_market_snapshot_max_stale_secs,
+    )
+    reasoner = FloorTraderReasoner(settings=s)
+
+    cfg = EngineConfig(
+        cycle_secs=cycle_secs or s.aitrade_engine_interval_secs,
+        discovery_top_n=top_n or s.aitrade_discovery_top_n,
+        target_notional_per_trade=target_notional,
+        duration=_parse_duration(duration),
+    )
+
+    with TradeLogger(log_dir=s.aitrade_log_dir, strategy_id="engine") as journal:
+        reconciler = RoundTripReconciler(journal)
+        console.print(
+            f"[cyan]Engine starting[/cyan]: cycle={cfg.cycle_secs}s "
+            f"top_n={cfg.discovery_top_n} notional=${cfg.target_notional_per_trade:.0f} "
+            f"duration={cfg.duration}"
+        )
+        run_engine(
+            discovery=discovery_agent,
+            market_fetcher=market_fetcher,
+            data=data,
+            broker=broker,
+            executor=exe,
+            reasoner=reasoner,
+            journal=journal,
+            reconciler=reconciler,
+            cfg=cfg,
+        )
+        console.print(f"[green]Engine done.[/green] run_id={journal.run_id}")
+
+
+@app.command("journal")
+def journal_cmd(
+    symbol: str | None = typer.Option(None, "--symbol", "-s", help="Filter by symbol"),
+    wins_only: bool = typer.Option(False, "--wins-only", help="Only WIN round-trips"),
+    losses_only: bool = typer.Option(False, "--losses-only", help="Only LOSS round-trips"),
+    limit: int = typer.Option(50, "--limit", "-n", help="Max rows to show"),
+) -> None:
+    """Pretty-print round-trips from the trade journal.
+
+    Reconciles open BUY/SELL pairs first so the latest state is shown.
+    """
+    from aitrade.journal.round_trips import PnlBucket, RoundTripReconciler
+    from aitrade.logging.trade_logger import TradeLogger
+
+    s = get_settings()
+    configure_logging(s.aitrade_log_dir, s.aitrade_log_level)
+    journal = TradeLogger(log_dir=s.aitrade_log_dir)
+    reconciler = RoundTripReconciler(journal)
+    reconciler.reconcile()
+
+    rows = reconciler.all_round_trips(symbol=symbol)
+    if wins_only:
+        rows = [r for r in rows if r.pnl_bucket is PnlBucket.WIN]
+    if losses_only:
+        rows = [r for r in rows if r.pnl_bucket is PnlBucket.LOSS]
+    rows = rows[:limit]
+
+    if not rows:
+        console.print("[yellow]No round-trips match those filters yet.[/yellow]")
+        return
+
+    t = Table(title=f"Round-trips ({len(rows)} shown)")
+    for col in ["entry_ts", "symbol", "qty", "entry", "exit", "pnl_pct", "pnl_usd",
+                "bucket", "exit_reason", "thesis"]:
+        t.add_column(col)
+    total_pnl = 0.0
+    wins = losses = 0
+    for r in rows:
+        total_pnl += r.pnl_usd
+        if r.pnl_bucket is PnlBucket.WIN:
+            wins += 1
+        elif r.pnl_bucket is PnlBucket.LOSS:
+            losses += 1
+        thesis = (r.entry_thesis or "-")[:60]
+        t.add_row(
+            r.entry_ts.strftime("%Y-%m-%d %H:%M"),
+            r.symbol,
+            f"{r.qty:.2f}",
+            f"{r.entry_price:.2f}",
+            f"{r.exit_price:.2f}",
+            f"{r.pnl_pct * 100:+.2f}%",
+            f"{r.pnl_usd:+.2f}",
+            r.pnl_bucket.value,
+            r.exit_reason.value,
+            thesis,
+        )
+    console.print(t)
+    console.print(
+        f"\n[bold]Total P&L:[/bold] ${total_pnl:+,.2f}  "
+        f"[bold]Wins/Losses:[/bold] {wins}/{losses}  "
+        f"[bold]Hit rate:[/bold] "
+        f"{wins / max(1, wins + losses):.1%}"
+    )
+
+
 if __name__ == "__main__":
     app()
