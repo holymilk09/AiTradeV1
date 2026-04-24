@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     aitrade_max_daily_loss_usd: float = Field(default=500.0, gt=0)
     aitrade_max_orders_per_min: int = Field(default=20, gt=0)
 
+    anthropic_api_key: SecretStr = Field(default=SecretStr(""))
+    aitrade_reasoner_model: str = Field(default="claude-opus-4-7")
+    aitrade_reasoner_min_gap_secs: int = Field(default=300, gt=0)
+
     @property
     def has_credentials(self) -> bool:
         return bool(

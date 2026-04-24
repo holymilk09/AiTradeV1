@@ -26,6 +26,7 @@ class EventType(str, Enum):
     ORDER_CANCELED = "order_canceled"
     ORDER_REJECTED = "order_rejected"
     RISK_BLOCKED = "risk_blocked"
+    REASONER_DECISION = "reasoner_decision"
     RUN_START = "run_start"
     RUN_END = "run_end"
 

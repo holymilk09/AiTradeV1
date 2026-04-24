@@ -335,5 +335,79 @@ def smoke_trade(
         )
 
 
+@app.command("reason-paper")
+def reason_paper(
+    symbol: str = typer.Option("AAPL", "--symbol", "-s"),
+    duration: str = typer.Option("30m", "--duration", "-d", help="e.g. 30s, 15m, 2h"),
+    timeframe: Timeframe = typer.Option(Timeframe.MIN_5, "--timeframe", "-t"),
+    poll_secs: int = typer.Option(60, "--poll-secs"),
+) -> None:
+    """Run a paper session where Claude decides every trade.
+
+    On each poll: compute indicators -> call reasoner -> risk gate -> Alpaca -> journal.
+    Reasoner calls are rate-limited per symbol (default: 5 min) to bound token cost.
+    Every decision (including `reason`) is saved to the trade journal for post-mortem.
+    """
+    from pathlib import Path
+
+    from aitrade.bots.reasoner_runner import ReasonerRunConfig, run_reasoner_session
+    from aitrade.brokers.alpaca import build_client
+    from aitrade.data.alpaca_data import AlpacaDataClient
+    from aitrade.execution.executor import Executor
+    from aitrade.execution.risk import RiskGate
+    from aitrade.logging.trade_logger import TradeLogger
+    from aitrade.reasoning.claude_reasoner import ClaudeReasoner
+
+    s = get_settings()
+    configure_logging(s.aitrade_log_dir, s.aitrade_log_level)
+    if not s.anthropic_api_key.get_secret_value():
+        console.print(
+            "[red]ANTHROPIC_API_KEY missing.[/red] Add it to .env and re-run."
+        )
+        raise typer.Exit(code=1)
+
+    broker = build_client()
+    data = AlpacaDataClient(s)
+    risk = RiskGate(
+        max_position_usd=s.aitrade_max_position_usd,
+        max_daily_loss_usd=s.aitrade_max_daily_loss_usd,
+        max_orders_per_min=s.aitrade_max_orders_per_min,
+        kill_switch_path=Path("KILL_SWITCH"),
+    )
+    exe = Executor(broker, risk)
+    reasoner = ClaudeReasoner(settings=s)
+
+    with TradeLogger(log_dir=s.aitrade_log_dir, strategy_id="llm_advised") as journal:
+        cfg = ReasonerRunConfig(
+            symbol=symbol,
+            timeframe=timeframe,
+            duration=_parse_duration(duration),
+            poll_interval_secs=poll_secs,
+        )
+        run_reasoner_session(reasoner, broker, data, exe, journal, cfg)
+        console.print(f"[green]Reasoner run complete.[/green] run_id={journal.run_id}")
+
+
+@app.command("chat")
+def chat() -> None:
+    """Open Claude Code conversationally with Alpaca MCP already wired.
+
+    Ad-hoc mode: ask Claude to check positions, place paper orders, or
+    research in plain English. Uses the MCP server configured in
+    .claude/settings.json. This is NOT the 24/7 bot — it's manual
+    interactive trading for research and one-offs.
+    """
+    console.print(
+        "\n[bold]Conversational trading mode[/bold]\n\n"
+        "1. Install Claude Code on this machine: https://claude.com/claude-code\n"
+        "2. Run [cyan]claude[/cyan] in this project directory.\n"
+        "3. The Alpaca MCP server auto-starts from .claude/settings.json.\n"
+        "4. Try: [dim]'show my paper positions'[/dim] or "
+        "[dim]'place a paper buy for 1 AAPL'[/dim].\n\n"
+        "The risk gate DOES NOT run in this mode — orders go straight to Alpaca. "
+        "Use small paper sizes only.\n"
+    )
+
+
 if __name__ == "__main__":
     app()
