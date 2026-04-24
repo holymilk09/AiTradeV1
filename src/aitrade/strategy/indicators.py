@@ -7,8 +7,9 @@ along with position state when deciding. Pure functions; no state.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
-from aitrade.data.models import Bar
+from aitrade.data.models import Bar, Timeframe
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,3 +155,59 @@ def compute_snapshot(
         bull_trend=bull_trend,
         fast_slow_cross=cross,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class MultiTimeframeSnapshot:
+    """Per-timeframe stack of :class:`IndicatorSnapshot`.
+
+    Strategies that condition on multi-resolution context (e.g. trade the
+    5-minute setup only when the 1-day stack is bullish) read the relevant
+    timeframe via :meth:`tf`.
+    """
+
+    per_tf: dict[Timeframe, IndicatorSnapshot]
+
+    def tf(self, timeframe: Timeframe) -> IndicatorSnapshot:
+        """Return the snapshot for ``timeframe``; raises ``KeyError`` if absent."""
+
+        return self.per_tf[timeframe]
+
+    def as_dict(self) -> dict[str, dict[str, Any]]:
+        """JSON-friendly dump keyed by timeframe value (e.g. ``"1Day"``)."""
+
+        return {
+            tf.value: {
+                "symbol": snap.symbol,
+                "price": snap.price,
+                "sma_fast": snap.sma_fast,
+                "sma_slow": snap.sma_slow,
+                "ema_12": snap.ema_12,
+                "ema_26": snap.ema_26,
+                "rsi_14": snap.rsi_14,
+                "macd": snap.macd,
+                "macd_signal": snap.macd_signal,
+                "atr_14": snap.atr_14,
+                "bull_trend": snap.bull_trend,
+                "fast_slow_cross": snap.fast_slow_cross,
+            }
+            for tf, snap in self.per_tf.items()
+        }
+
+
+def compute_multi_tf_snapshot(
+    bars_by_tf: dict[Timeframe, list[Bar]],
+) -> MultiTimeframeSnapshot:
+    """Compute an :class:`IndicatorSnapshot` per timeframe and bundle them.
+
+    Each value in ``bars_by_tf`` must be a non-empty list of bars at that
+    resolution. Raises ``ValueError`` for any empty list (an empty input
+    means we have no data at all, which would silently mask a fetch bug).
+    """
+
+    per_tf: dict[Timeframe, IndicatorSnapshot] = {}
+    for tf, bars in bars_by_tf.items():
+        if not bars:
+            raise ValueError(f"empty bar list for timeframe={tf.value}")
+        per_tf[tf] = compute_snapshot(bars)
+    return MultiTimeframeSnapshot(per_tf=per_tf)

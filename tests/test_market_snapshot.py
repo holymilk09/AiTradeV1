@@ -1,0 +1,214 @@
+"""MarketSnapshotFetcher and regime classification."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from unittest.mock import MagicMock
+
+import pandas as pd
+import pytest
+
+from aitrade.data.models import Timeframe
+from aitrade.market.freshness import StaleDataError
+from aitrade.market.regime import Regime, classify_regime
+from aitrade.market.snapshot import (
+    MarketSnapshot,
+    MarketSnapshotFetcher,
+    _detect_session,
+)
+
+# --------------------------------------------------------------------------- #
+# Regime classifier — pure 2x2 grid                                            #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("spy_change_pct", "vix", "expected"),
+    [
+        (0.5, 15.0, Regime.RISK_ON_LOW_VOL),
+        (0.5, 25.0, Regime.RISK_ON_HIGH_VOL),
+        (-0.5, 15.0, Regime.RISK_OFF_LOW_VOL),
+        (-0.5, 25.0, Regime.RISK_OFF_HIGH_VOL),
+        # Boundary: spy=0 is risk-on, vix=20 is high-vol
+        (0.0, 20.0, Regime.RISK_ON_HIGH_VOL),
+    ],
+)
+def test_classify_regime(spy_change_pct: float, vix: float, expected: Regime) -> None:
+    assert classify_regime(spy_change_pct, vix) is expected
+
+
+# --------------------------------------------------------------------------- #
+# Session detection                                                            #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("ny_dt", "expected"),
+    [
+        # Tuesday 2026-04-21
+        (datetime(2026, 4, 21, 5, 0), "premarket"),
+        (datetime(2026, 4, 21, 9, 0), "premarket"),
+        (datetime(2026, 4, 21, 9, 30), "regular"),
+        (datetime(2026, 4, 21, 12, 0), "regular"),
+        (datetime(2026, 4, 21, 15, 59), "regular"),
+        (datetime(2026, 4, 21, 16, 0), "afterhours"),
+        (datetime(2026, 4, 21, 19, 59), "afterhours"),
+        (datetime(2026, 4, 21, 20, 0), "closed"),
+        (datetime(2026, 4, 21, 3, 0), "closed"),
+        # Saturday 2026-04-25 — always closed
+        (datetime(2026, 4, 25, 12, 0), "closed"),
+        # Sunday 2026-04-26 — always closed
+        (datetime(2026, 4, 26, 12, 0), "closed"),
+    ],
+)
+def test_detect_session(ny_dt: datetime, expected: str) -> None:
+    from zoneinfo import ZoneInfo
+
+    aware = ny_dt.replace(tzinfo=ZoneInfo("America/New_York"))
+    assert _detect_session(aware.astimezone(UTC)) == expected
+
+
+# --------------------------------------------------------------------------- #
+# Fetcher: caching, TTL, stale fallback                                        #
+# --------------------------------------------------------------------------- #
+
+
+def _df(closes: list[float]) -> pd.DataFrame:
+    idx = pd.date_range("2026-04-15", periods=len(closes), freq="D", tz="UTC")
+    return pd.DataFrame({"close": closes}, index=idx)
+
+
+def _wire_mock(mock: MagicMock, *, vix_close: float | None = 19.0) -> None:
+    """Set up the mock data client to return canned daily bars per symbol."""
+
+    def side_effect(
+        symbol: str,
+        timeframe: Timeframe,
+        start: datetime,
+        end: datetime,
+        **_: Any,
+    ) -> pd.DataFrame:
+        if symbol == "SPY":
+            return _df([500.0, 505.0])  # +1.0% change
+        if symbol == "QQQ":
+            return _df([400.0, 396.0])  # -1.0% change
+        if symbol == "VIXY":
+            if vix_close is None:
+                return pd.DataFrame()
+            return _df([vix_close - 1, vix_close])
+        raise AssertionError(f"unexpected symbol {symbol}")
+
+    mock.fetch_stock_bars.side_effect = side_effect
+
+
+def test_fetch_returns_snapshot_with_regime() -> None:
+    data = MagicMock()
+    _wire_mock(data, vix_close=15.0)
+    fetcher = MarketSnapshotFetcher(data=data, ttl_secs=30, max_stale_secs=300)
+
+    snap = fetcher.fetch()
+
+    assert isinstance(snap, MarketSnapshot)
+    assert snap.spy_price == 505.0
+    assert snap.spy_change_pct == pytest.approx(1.0)
+    assert snap.qqq_price == 396.0
+    assert snap.qqq_change_pct == pytest.approx(-1.0)
+    assert snap.vix == 15.0
+    # SPY +1% → risk_on; VIX 15 → low_vol
+    assert snap.regime is Regime.RISK_ON_LOW_VOL
+
+
+def test_fetch_uses_default_vix_when_proxy_unavailable() -> None:
+    data = MagicMock()
+    _wire_mock(data, vix_close=None)
+    fetcher = MarketSnapshotFetcher(data=data)
+    snap = fetcher.fetch()
+    assert snap.vix == 18.0
+
+
+def test_cache_hit_within_ttl() -> None:
+    data = MagicMock()
+    _wire_mock(data)
+    fetcher = MarketSnapshotFetcher(data=data, ttl_secs=30)
+
+    first = fetcher.fetch()
+    second = fetcher.fetch()
+    assert first is second
+    # SPY + QQQ + VIXY = 3 calls only on the first fetch
+    assert data.fetch_stock_bars.call_count == 3
+
+
+def test_cache_miss_after_ttl_elapses() -> None:
+    data = MagicMock()
+    _wire_mock(data)
+    fetcher = MarketSnapshotFetcher(data=data, ttl_secs=30)
+
+    first = fetcher.fetch()
+    # Backdate the cached snapshot to look TTL-stale.
+    object.__setattr__(
+        first, "fetched_at", first.fetched_at - timedelta(seconds=120)
+    )
+    second = fetcher.fetch()
+
+    assert second is not first
+    assert data.fetch_stock_bars.call_count == 6  # second fetch repeated all 3 calls
+
+
+def test_force_refresh_bypasses_cache() -> None:
+    data = MagicMock()
+    _wire_mock(data)
+    fetcher = MarketSnapshotFetcher(data=data, ttl_secs=300)
+
+    fetcher.fetch()
+    fetcher.fetch(force_refresh=True)
+    assert data.fetch_stock_bars.call_count == 6
+
+
+def test_stale_fallback_within_max_stale_secs() -> None:
+    data = MagicMock()
+    _wire_mock(data)
+    fetcher = MarketSnapshotFetcher(data=data, ttl_secs=10, max_stale_secs=600)
+
+    first = fetcher.fetch()
+    # Make cache TTL-stale but inside the max-stale budget.
+    object.__setattr__(
+        first, "fetched_at", first.fetched_at - timedelta(seconds=120)
+    )
+
+    # Next fetch fails — but a primary-symbol failure must surface, while a
+    # cached snapshot is still acceptable.
+    data.fetch_stock_bars.side_effect = RuntimeError("network down")
+    second = fetcher.fetch()
+    assert second is first
+
+
+def test_stale_data_error_when_cache_too_old() -> None:
+    data = MagicMock()
+    _wire_mock(data)
+    fetcher = MarketSnapshotFetcher(data=data, ttl_secs=10, max_stale_secs=60)
+
+    first = fetcher.fetch()
+    # Backdate cache beyond max_stale_secs.
+    object.__setattr__(
+        first, "fetched_at", first.fetched_at - timedelta(seconds=600)
+    )
+    data.fetch_stock_bars.side_effect = RuntimeError("network down")
+
+    with pytest.raises(StaleDataError):
+        fetcher.fetch()
+
+
+def test_age_secs_uses_provided_clock() -> None:
+    snap = MarketSnapshot(
+        spy_price=1.0,
+        spy_change_pct=0.0,
+        qqq_price=1.0,
+        qqq_change_pct=0.0,
+        vix=18.0,
+        regime=Regime.RISK_ON_LOW_VOL,
+        session="regular",
+        fetched_at=datetime(2026, 4, 24, 12, 0, tzinfo=UTC),
+    )
+    later = datetime(2026, 4, 24, 12, 1, tzinfo=UTC)
+    assert snap.age_secs(later) == 60.0
