@@ -473,19 +473,32 @@ def engine_paper(
     target_notional: float = typer.Option(
         2_000.0, "--notional", help="Target USD per trade. Capped by RiskGate."
     ),
+    use_web_discovery: bool = typer.Option(
+        False,
+        "--use-web-discovery/--no-web-discovery",
+        help="Add Claude+web_search sentiment overlay. Off by default — "
+        "watchlist + Alpaca movers are usually enough and don't need network reliability.",
+    ),
+    no_watchlist: bool = typer.Option(
+        False, "--no-watchlist", help="Disable the static watchlist source."
+    ),
+    no_movers: bool = typer.Option(
+        False, "--no-movers", help="Disable the Alpaca movers source."
+    ),
 ) -> None:
     """Run the full Phase-1 signal engine in paper mode.
 
-    Each cycle: discover trending tickers → scan multi-TF patterns → rank
-    candidates → Claude floor-trader picks one (or passes) → risk gate →
-    Alpaca paper. Every event lands in the trade journal; round-trips are
-    reconciled after each cycle for Phase-1.5 experience replay.
+    Each cycle: build universe (watchlist + movers + optional web) →
+    scan multi-TF patterns → rank candidates → Claude floor-trader picks
+    one (or passes) → risk gate → Alpaca paper. Every event lands in
+    the trade journal; round-trips are reconciled after each cycle.
     """
     from aitrade.bots.engine_runner import EngineConfig, run_engine
     from aitrade.brokers.alpaca import build_client
     from aitrade.data.alpaca_data import AlpacaDataClient
     from aitrade.discovery.agent import DiscoveryAgent
     from aitrade.discovery.extractor import TickerExtractor, load_alpaca_active_equities
+    from aitrade.discovery.movers import MoversFinder
     from aitrade.discovery.scorer import BuzzScorer
     from aitrade.execution.executor import Executor
     from aitrade.execution.risk import RiskGate
@@ -513,10 +526,14 @@ def engine_paper(
     )
     exe = Executor(broker, risk)
 
-    valid = load_alpaca_active_equities(s)
-    extractor = TickerExtractor(valid_tickers=valid)
-    scorer = BuzzScorer()
-    discovery_agent = DiscoveryAgent(settings=s, extractor=extractor, scorer=scorer)
+    movers = MoversFinder(settings=s) if not no_movers else None
+
+    discovery_agent: DiscoveryAgent | None = None
+    if use_web_discovery:
+        valid = load_alpaca_active_equities(s)
+        extractor = TickerExtractor(valid_tickers=valid)
+        scorer = BuzzScorer()
+        discovery_agent = DiscoveryAgent(settings=s, extractor=extractor, scorer=scorer)
 
     market_fetcher = MarketSnapshotFetcher(
         data,
@@ -530,17 +547,28 @@ def engine_paper(
         discovery_top_n=top_n or s.aitrade_discovery_top_n,
         target_notional_per_trade=target_notional,
         duration=_parse_duration(duration),
+        use_watchlist=not no_watchlist,
+        use_movers=not no_movers,
+        use_web_discovery=use_web_discovery,
     )
 
     with TradeLogger(log_dir=s.aitrade_log_dir, strategy_id="engine") as journal:
         reconciler = RoundTripReconciler(journal)
+        sources = []
+        if cfg.use_watchlist:
+            sources.append("watchlist")
+        if cfg.use_movers:
+            sources.append("movers")
+        if cfg.use_web_discovery:
+            sources.append("web")
         console.print(
             f"[cyan]Engine starting[/cyan]: cycle={cfg.cycle_secs}s "
             f"top_n={cfg.discovery_top_n} notional=${cfg.target_notional_per_trade:.0f} "
-            f"duration={cfg.duration}"
+            f"duration={cfg.duration} sources=[{', '.join(sources)}]"
         )
         run_engine(
             discovery=discovery_agent,
+            movers=movers,
             market_fetcher=market_fetcher,
             data=data,
             broker=broker,

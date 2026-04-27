@@ -36,7 +36,9 @@ from aitrade.brokers.base import BrokerClient
 from aitrade.data.alpaca_data import AlpacaDataClient
 from aitrade.data.models import Bar, Timeframe
 from aitrade.discovery.agent import DiscoveryAgent
+from aitrade.discovery.movers import MoversFinder
 from aitrade.discovery.scorer import DiscoveredTicker
+from aitrade.discovery.universe import build_universe
 from aitrade.execution.executor import Executor
 from aitrade.execution.orders import OrderRequest, OrderType, Side, TimeInForce
 from aitrade.journal.round_trips import RoundTripReconciler
@@ -70,6 +72,10 @@ class EngineConfig:
     target_notional_per_trade: float = 2_000.0
     max_cycles: int | None = None
     duration: timedelta | None = None
+    # Universe sources — deterministic + cheap on, web layer opt-in.
+    use_watchlist: bool = True
+    use_movers: bool = True
+    use_web_discovery: bool = False
 
 
 def _bars_lookback_window(tf: Timeframe, count: int) -> tuple[datetime, datetime]:
@@ -189,7 +195,8 @@ def _decision_to_order(
 
 def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
     *,
-    discovery: DiscoveryAgent,
+    discovery: DiscoveryAgent | None,
+    movers: MoversFinder | None,
     market_fetcher: MarketSnapshotFetcher,
     data: AlpacaDataClient,
     broker: BrokerClient,
@@ -202,12 +209,24 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
     cycle_start = datetime.now(UTC)
     logger.info("engine cycle start at {}", cycle_start.isoformat())
 
-    discovered: list[DiscoveredTicker] = discovery.discover(top_n=cfg.discovery_top_n)
+    discovered: list[DiscoveredTicker] = build_universe(
+        movers=movers,
+        web_agent=discovery,
+        web_top_n=cfg.discovery_top_n,
+        use_watchlist=cfg.use_watchlist,
+        use_movers=cfg.use_movers,
+        use_web=cfg.use_web_discovery,
+    )
+    # Cap to top-N so a hot day doesn't blow up the per-cycle bar fetches.
+    discovered = discovered[: cfg.discovery_top_n]
     journal.record(
         EventType.DISCOVERY_SCAN,
         symbol="-",
         payload={
             "count": len(discovered),
+            "use_watchlist": cfg.use_watchlist,
+            "use_movers": cfg.use_movers,
+            "use_web": cfg.use_web_discovery,
             "tickers": [
                 {"symbol": d.symbol, "buzz_score": d.buzz_score} for d in discovered
             ],
@@ -215,7 +234,7 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
     )
     if not discovered:
         journal.record(EventType.EMPTY_DISCOVERY, symbol="-", payload={})
-        logger.info("discovery returned 0 tickers; skipping cycle")
+        logger.info("universe is empty this cycle; skipping")
         return
 
     # Market snapshot first — bail if stale.
@@ -399,7 +418,8 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
 
 def run_engine(
     *,
-    discovery: DiscoveryAgent,
+    discovery: DiscoveryAgent | None,
+    movers: MoversFinder | None,
     market_fetcher: MarketSnapshotFetcher,
     data: AlpacaDataClient,
     broker: BrokerClient,
@@ -422,6 +442,7 @@ def run_engine(
         try:
             _run_one_cycle(
                 discovery=discovery,
+                movers=movers,
                 market_fetcher=market_fetcher,
                 data=data,
                 broker=broker,
