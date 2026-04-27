@@ -1,9 +1,16 @@
 """Discovery agent — ask Claude what tickers the market is buzzing about.
 
 The agent calls Claude with the ``web_search_20260209`` and ``web_fetch_20260209``
-server-side tools, constraining the final response to a JSON schema so the
-output is parseable. Each candidate is then validated against the extractor's
-universe and scored by :class:`BuzzScorer`.
+server-side tools. Claude is instructed to emit a single JSON object as its
+final text block; the agent parses it and validates each candidate against the
+extractor's universe, then scores by :class:`BuzzScorer`.
+
+Note: we deliberately do **not** use ``output_config={"format": {"type":
+"json_schema", ...}}`` here. Structured outputs are not compatible with the
+server-side ``web_search_20260209`` / ``web_fetch_20260209`` tools — combining
+them causes the API to reject the request and the SDK to surface the failure
+as a generic ``APIConnectionError("Connection error.")``. We parse the JSON
+ourselves from the trailing text block, which is robust enough.
 
 Errors at any stage (no API key, network, unparseable output) yield an empty
 list rather than propagating — discovery is best-effort, never load-bearing.
@@ -12,6 +19,8 @@ list rather than propagating — discovery is best-effort, never load-bearing.
 from __future__ import annotations
 
 import json
+import re
+import traceback
 from datetime import UTC, datetime
 from typing import Any
 
@@ -36,35 +45,18 @@ For each ticker you find, record:
   - age_minutes: estimated age of that source in minutes (use 60 if unsure)
   - snippet: a short context snippet (<200 chars) explaining why it's buzzing
 
-Return ONLY a JSON object matching the provided schema — no preamble, no
-commentary, no markdown fences. Symbols MUST be uppercase US equity tickers
-(1-5 letters).
+CRITICAL OUTPUT FORMAT: After your tool use, your final text response MUST be
+a single JSON object — nothing before it, nothing after it, no markdown fences,
+no commentary. The exact shape is:
 
-Be selective. Quality over quantity. Twenty solid candidates beats fifty noisy
-ones."""
+{"tickers": [{"symbol": "...", "mention_count": N, "source_url": "...",
+"age_minutes": N, "snippet": "..."}, ...]}
 
-_OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "tickers": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "symbol": {"type": "string"},
-                    "mention_count": {"type": "integer"},
-                    "source_url": {"type": "string"},
-                    "age_minutes": {"type": "number"},
-                    "snippet": {"type": "string"},
-                },
-                "required": ["symbol", "mention_count", "source_url", "age_minutes", "snippet"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["tickers"],
-    "additionalProperties": False,
-}
+Symbols MUST be uppercase US equity tickers (1-5 letters). Be selective —
+quality over quantity. Twenty solid candidates beats fifty noisy ones."""
+
+
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 class DiscoveryAgent:
@@ -120,7 +112,7 @@ class DiscoveryAgent:
         try:
             response = client.messages.create(  # type: ignore[attr-defined]
                 model=self._settings.aitrade_reasoner_model,
-                max_tokens=2048,
+                max_tokens=4096,
                 system=[
                     {
                         "type": "text",
@@ -133,7 +125,8 @@ class DiscoveryAgent:
                         "role": "user",
                         "content": (
                             "Find the most-buzzed US stock tickers right now and "
-                            "return them as JSON per the schema."
+                            "return them as the JSON object described in the "
+                            "system prompt. JSON only, no other text."
                         ),
                     }
                 ],
@@ -142,10 +135,18 @@ class DiscoveryAgent:
                     {"type": "web_fetch_20260209", "name": "web_fetch"},
                 ],
                 tool_choice={"type": "auto"},
-                output_config={"format": {"type": "json_schema", "schema": _OUTPUT_SCHEMA}},
             )
         except Exception as e:
-            logger.warning("DiscoveryAgent: Claude call failed: {}", e)
+            # Anthropic's APIConnectionError surfaces a useless "Connection error"
+            # message. Log the type + a one-line summary of the traceback's last
+            # frame so failures are diagnosable.
+            tb_tail = traceback.format_exc().splitlines()[-1] if traceback else ""
+            logger.warning(
+                "DiscoveryAgent: Claude call failed: {} ({}) — {}",
+                type(e).__name__,
+                e,
+                tb_tail,
+            )
             return []
 
         raw = self._extract_json_text(response)
@@ -156,7 +157,11 @@ class DiscoveryAgent:
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as e:
-            logger.warning("DiscoveryAgent: JSON parse failed: {}", e)
+            logger.warning(
+                "DiscoveryAgent: JSON parse failed: {} (raw head: {!r})",
+                e,
+                raw[:200],
+            )
             return []
 
         candidates = payload.get("tickers", []) if isinstance(payload, dict) else []
@@ -169,15 +174,34 @@ class DiscoveryAgent:
         return discovered[:top_n]
 
     def _extract_json_text(self, response: object) -> str | None:
-        """Pull the first text-block payload out of a Messages API response."""
+        """Find the JSON object in the response.
+
+        Claude may emit reasoning text mixed with tool use; the final text
+        block typically contains the JSON. We:
+          1. Walk all text blocks (last to first preferred).
+          2. Try direct parse first.
+          3. Fall back to grabbing the first ``{...}`` substring via regex.
+        """
         content = getattr(response, "content", None)
         if not content:
             return None
+        text_blocks: list[str] = []
         for block in content:
             if getattr(block, "type", None) == "text":
                 text = getattr(block, "text", None)
                 if isinstance(text, str) and text.strip():
-                    return text
+                    text_blocks.append(text)
+        if not text_blocks:
+            return None
+        # Prefer the last text block — that's typically the final answer
+        # after any tool-use reasoning.
+        for candidate in reversed(text_blocks):
+            stripped = candidate.strip()
+            if stripped.startswith("{"):
+                return stripped
+            match = _JSON_OBJECT_RE.search(stripped)
+            if match:
+                return match.group(0)
         return None
 
     def _build_discovered(self, candidates: list[Any]) -> list[DiscoveredTicker]:
