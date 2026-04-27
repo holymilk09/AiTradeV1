@@ -109,8 +109,11 @@ class DiscoveryAgent:
         if client is None:
             return []
 
+        # Stream the request — web_search can run for 30-90s and a non-streaming
+        # connection often gets dropped by intermediate proxies / VPNs mid-flight,
+        # surfacing as APIConnectionError. Streaming keeps the channel hot.
         try:
-            response = client.messages.create(  # type: ignore[attr-defined]
+            with client.messages.stream(  # type: ignore[attr-defined]
                 model=self._settings.aitrade_reasoner_model,
                 max_tokens=4096,
                 system=[
@@ -135,7 +138,8 @@ class DiscoveryAgent:
                     {"type": "web_fetch_20260209", "name": "web_fetch"},
                 ],
                 tool_choice={"type": "auto"},
-            )
+            ) as stream:
+                response = stream.get_final_message()
         except Exception as e:
             # Anthropic's APIConnectionError surfaces a useless "Connection error"
             # message. Log the type + a one-line summary of the traceback's last
