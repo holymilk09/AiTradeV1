@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import traceback
 from datetime import UTC, datetime
 from typing import Any
@@ -112,45 +113,61 @@ class DiscoveryAgent:
         # Stream the request — web_search can run for 30-90s and a non-streaming
         # connection often gets dropped by intermediate proxies / VPNs mid-flight,
         # surfacing as APIConnectionError. Streaming keeps the channel hot.
-        try:
-            with client.messages.stream(  # type: ignore[attr-defined]
-                model=self._settings.aitrade_reasoner_model,
-                max_tokens=4096,
-                system=[
-                    {
-                        "type": "text",
-                        "text": _SYSTEM_PROMPT,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-                messages=[
-                    {
-                        "role": "user",
-                        "content": (
-                            "Find the most-buzzed US stock tickers right now and "
-                            "return them as the JSON object described in the "
-                            "system prompt. JSON only, no other text."
-                        ),
-                    }
-                ],
-                tools=[
-                    {"type": "web_search_20260209", "name": "web_search"},
-                    {"type": "web_fetch_20260209", "name": "web_fetch"},
-                ],
-                tool_choice={"type": "auto"},
-            ) as stream:
-                response = stream.get_final_message()
-        except Exception as e:
-            # Anthropic's APIConnectionError surfaces a useless "Connection error"
-            # message. Log the type + a one-line summary of the traceback's last
-            # frame so failures are diagnosable.
-            tb_tail = traceback.format_exc().splitlines()[-1] if traceback else ""
-            logger.warning(
-                "DiscoveryAgent: Claude call failed: {} ({}) — {}",
-                type(e).__name__,
-                e,
-                tb_tail,
-            )
+        # Even with streaming, transient stream drops (httpx.RemoteProtocolError)
+        # do happen on flaky networks; retry up to 3 times with backoff.
+        response: object | None = None
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                with client.messages.stream(  # type: ignore[attr-defined]
+                    model=self._settings.aitrade_reasoner_model,
+                    max_tokens=4096,
+                    system=[
+                        {
+                            "type": "text",
+                            "text": _SYSTEM_PROMPT,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": (
+                                "Find the most-buzzed US stock tickers right now and "
+                                "return them as the JSON object described in the "
+                                "system prompt. JSON only, no other text."
+                            ),
+                        }
+                    ],
+                    tools=[
+                        {"type": "web_search_20260209", "name": "web_search"},
+                        {"type": "web_fetch_20260209", "name": "web_fetch"},
+                    ],
+                    tool_choice={"type": "auto"},
+                ) as stream:
+                    response = stream.get_final_message()
+                break  # success
+            except Exception as e:
+                last_err = e
+                if attempt < 2:
+                    logger.warning(
+                        "DiscoveryAgent: stream attempt {} failed ({}); retrying…",
+                        attempt + 1,
+                        type(e).__name__,
+                    )
+                    time.sleep(2 ** attempt)  # 1s, 2s
+                    continue
+                tb_tail = traceback.format_exc().splitlines()[-1] if traceback else ""
+                logger.warning(
+                    "DiscoveryAgent: Claude call failed after 3 attempts: {} ({}) — {}",
+                    type(e).__name__,
+                    e,
+                    tb_tail,
+                )
+                return []
+        if response is None:
+            # Belt-and-suspenders — should be unreachable given the loop above.
+            logger.warning("DiscoveryAgent: no response captured ({})", last_err)
             return []
 
         raw = self._extract_json_text(response)
