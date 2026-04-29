@@ -28,7 +28,9 @@ class AccountState(BaseModel):
 @router.get("")
 async def get_account() -> AccountState:
     cur = await redis().get(_REDIS_KEY)
-    return AccountState(selected=cur or get_settings().default_account)
+    raw = cur or get_settings().default_account
+    selected: Literal["paper", "live"] = "live" if raw == "live" else "paper"
+    return AccountState(selected=selected)
 
 
 class SetAccountBody(BaseModel):
