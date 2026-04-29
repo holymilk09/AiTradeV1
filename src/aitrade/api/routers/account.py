@@ -28,7 +28,7 @@ class AccountState(BaseModel):
 @router.get("")
 async def get_account() -> AccountState:
     cur = await redis().get(_REDIS_KEY)
-    return AccountState(selected=cur or get_settings().default_account)  # type: ignore[arg-type]
+    return AccountState(selected=cur or get_settings().default_account)
 
 
 class SetAccountBody(BaseModel):
