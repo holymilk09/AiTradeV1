@@ -31,6 +31,16 @@ dev = [
     "mypy>=1.10",
     "types-requests",
 ]
+api = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "psycopg[binary]>=3.2",
+    "alembic>=1.13",
+    "redis>=5.0",
+    "arq>=0.26",
+]
 
 [project.scripts]
 aitrade = "aitrade.cli:app"

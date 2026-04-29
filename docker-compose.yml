@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: timescale/timescaledb-ha:pg16
+    container_name: aitrade-postgres
+    environment:
+      POSTGRES_USER: aitrade
+      POSTGRES_PASSWORD: aitrade
+      POSTGRES_DB: aitrade
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - aitrade_pgdata:/home/postgres/pgdata/data
+      - ./scripts/postgres-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "aitrade", "-d", "aitrade"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: aitrade-redis
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - aitrade_redisdata:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  aitrade_pgdata:
+  aitrade_redisdata:
