@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     aitrade_market_snapshot_ttl_secs: int = Field(default=30, gt=0)
     aitrade_market_snapshot_max_stale_secs: int = Field(default=300, gt=0)
 
+    # Phase 2 — news + calendar context
+    fmp_api_key: SecretStr = Field(default=SecretStr(""))
+    aitrade_news_lookback_hours: int = Field(default=24, gt=0)
+    aitrade_news_per_symbol: int = Field(default=3, gt=0)
+    aitrade_calendar_days_ahead: int = Field(default=7, gt=0)
+
     @property
     def has_credentials(self) -> bool:
         return bool(
