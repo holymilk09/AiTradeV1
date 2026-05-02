@@ -38,6 +38,15 @@ FLOOR_TRADER_SYSTEM_PROMPT = (
     "- market_snapshot: a JSON dump of the current market regime / breadth / volatility\n"
     "- multi_tf_snapshots: per-symbol indicator dump across multiple timeframes "
     "(e.g. 5m / 15m / 1h)\n"
+    "- news_by_symbol: keyed by candidate symbol, recent headlines "
+    "({headline, source, age_min, summary}). Use these as catalyst evidence. "
+    "Empty = no recent news.\n"
+    "- economic_calendar: upcoming US macro events (Fed/CPI/NFP/GDP/etc.) — "
+    "each {date, event, prev, est, actual, impact}. Risk-off the day before "
+    "high-impact events; sized smaller right before / after a release.\n"
+    "- upcoming_earnings: earnings releases relevant to the board — each "
+    "{date, symbol, time, eps_estimated, ...}. Earnings within 48h is a "
+    "strong reason to pass or wait.\n"
     "- prior_experience: keyed by candidate symbol, a list of compact past round-trips "
     "the bot took on similar setups (same symbol / shared pattern / same regime). "
     "Each entry has {when, pattern, outcome, thesis, what_happened, market_then}. "
@@ -60,7 +69,11 @@ FLOOR_TRADER_SYSTEM_PROMPT = (
     "8. **Use prior_experience**. If past trades on this setup were mostly losses, "
     "lower confidence or pass; if they were mostly wins, you may upweight. "
     "Reference the experience in your reason_for_pass or thesis when it changes "
-    "your mind. Empty = no signal in either direction.\n\n"
+    "your mind. Empty = no signal in either direction.\n"
+    "9. **Earnings within 48h** for the picked symbol → pass or size very small. "
+    "Earnings can wipe out technical setups. Mention it in reason_for_pass.\n"
+    "10. **High-impact macro events same-day** (FOMC, CPI, NFP) → reduce confidence "
+    "across the board; prefer waiting until after the print.\n\n"
     "When you do trade, your output must include:\n"
     "- pick_symbol — the chosen ticker\n"
     "- direction — LONG (enter) or FLAT (close)\n"
@@ -104,6 +117,29 @@ class FloorTraderInput(BaseModel):
         default_factory=dict,
         description="Keyed by symbol; value is a multi-timeframe indicator dump.",
     )
+    news_by_symbol: dict[str, list[dict[str, object]]] = Field(
+        default_factory=dict,
+        description=(
+            "Phase 2: keyed by candidate symbol, a list of compact recent "
+            "news headlines (each: {headline, source, age_min, summary}). "
+            "Empty list = no recent news on this name."
+        ),
+    )
+    economic_calendar: list[dict[str, object]] = Field(
+        default_factory=list,
+        description=(
+            "Phase 2: upcoming US economic events for the day/week ahead "
+            "(Fed/CPI/NFP/GDP/etc.) — each entry: "
+            "{date, event, prev, est, actual, impact}. Empty if FMP key absent."
+        ),
+    )
+    upcoming_earnings: list[dict[str, object]] = Field(
+        default_factory=list,
+        description=(
+            "Phase 2: upcoming earnings releases relevant to the candidate "
+            "board — each entry: {date, symbol, time, eps_estimated, ...}."
+        ),
+    )
     prior_experience: dict[str, list[dict[str, object]]] = Field(
         default_factory=dict,
         description=(
@@ -132,6 +168,9 @@ def _render_floor_user_message(ctx: FloorTraderInput) -> str:
             },
             "market_snapshot": ctx.market_snapshot,
             "multi_tf_snapshots": ctx.multi_tf_snapshots,
+            "news_by_symbol": ctx.news_by_symbol,
+            "economic_calendar": ctx.economic_calendar,
+            "upcoming_earnings": ctx.upcoming_earnings,
             "prior_experience": ctx.prior_experience,
         },
         indent=2,
