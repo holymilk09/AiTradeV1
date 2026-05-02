@@ -502,7 +502,9 @@ def engine_paper(
     from aitrade.discovery.scorer import BuzzScorer
     from aitrade.execution.executor import Executor
     from aitrade.execution.risk import RiskGate
+    from aitrade.journal.narratives import NarrativeGenerator
     from aitrade.journal.round_trips import RoundTripReconciler
+    from aitrade.journal.similarity import SimilarTradesFinder
     from aitrade.logging.trade_logger import TradeLogger
     from aitrade.market.snapshot import MarketSnapshotFetcher
     from aitrade.reasoning.floor_trader import FloorTraderReasoner
@@ -554,6 +556,8 @@ def engine_paper(
 
     with TradeLogger(log_dir=s.aitrade_log_dir, strategy_id="engine") as journal:
         reconciler = RoundTripReconciler(journal)
+        similar_finder = SimilarTradesFinder(journal)
+        narrative_gen = NarrativeGenerator(journal, settings=s)
         sources = []
         if cfg.use_watchlist:
             sources.append("watchlist")
@@ -574,6 +578,8 @@ def engine_paper(
             broker=broker,
             executor=exe,
             reasoner=reasoner,
+            similar_finder=similar_finder,
+            narrative_gen=narrative_gen,
             journal=journal,
             reconciler=reconciler,
             cfg=cfg,
@@ -584,15 +590,29 @@ def engine_paper(
 @app.command("journal")
 def journal_cmd(
     symbol: str | None = typer.Option(None, "--symbol", "-s", help="Filter by symbol"),
+    pattern: str | None = typer.Option(
+        None, "--pattern", "-p",
+        help="Filter to round-trips whose pattern_hits include this pattern (e.g. volume_trend)",
+    ),
     wins_only: bool = typer.Option(False, "--wins-only", help="Only WIN round-trips"),
     losses_only: bool = typer.Option(False, "--losses-only", help="Only LOSS round-trips"),
     limit: int = typer.Option(50, "--limit", "-n", help="Max rows to show"),
+    stats: bool = typer.Option(
+        False, "--stats", help="Show per-pattern win-rate + P&L summary instead of trade rows"
+    ),
+    export_llm: bool = typer.Option(
+        False, "--export-llm",
+        help="Print a Markdown digest of the journal suitable for pasting into Claude Desktop",
+    ),
 ) -> None:
     """Pretty-print round-trips from the trade journal.
 
     Reconciles open BUY/SELL pairs first so the latest state is shown.
+    Use --stats for per-pattern win-rate, or --export-llm for a paste-able
+    Markdown digest of recent trades + narratives.
     """
     from aitrade.journal.round_trips import PnlBucket, RoundTripReconciler
+    from aitrade.journal.views import JournalViews
     from aitrade.logging.trade_logger import TradeLogger
 
     s = get_settings()
@@ -600,14 +620,42 @@ def journal_cmd(
     journal = TradeLogger(log_dir=s.aitrade_log_dir)
     reconciler = RoundTripReconciler(journal)
     reconciler.reconcile()
+    views = JournalViews(journal)
 
-    rows = reconciler.all_round_trips(symbol=symbol)
-    if wins_only:
-        rows = [r for r in rows if r.pnl_bucket is PnlBucket.WIN]
-    if losses_only:
-        rows = [r for r in rows if r.pnl_bucket is PnlBucket.LOSS]
-    rows = rows[:limit]
+    if export_llm:
+        console.print(views.export_for_llm(max_trades=200))
+        return
 
+    if stats:
+        ps = views.pattern_stats()
+        if not ps:
+            console.print("[yellow]No round-trips yet to compute stats.[/yellow]")
+            return
+        t = Table(title="Pattern stats — across all closed round-trips")
+        for col in ["pattern", "n_trades", "wins", "losses", "be",
+                    "win_rate", "avg_pnl_pct", "total_pnl_usd"]:
+            t.add_column(col)
+        for ps_row in ps:
+            t.add_row(
+                ps_row.pattern,
+                str(ps_row.n_trades),
+                str(ps_row.n_wins),
+                str(ps_row.n_losses),
+                str(ps_row.n_breakeven),
+                f"{ps_row.win_rate:.1%}",
+                f"{ps_row.avg_pnl_pct * 100:+.2f}%",
+                f"{ps_row.total_pnl_usd:+,.2f}",
+            )
+        console.print(t)
+        return
+
+    rows = views.round_trips(
+        symbol=symbol,
+        pattern=pattern,
+        wins_only=wins_only,
+        losses_only=losses_only,
+        limit=limit,
+    )
     if not rows:
         console.print("[yellow]No round-trips match those filters yet.[/yellow]")
         return

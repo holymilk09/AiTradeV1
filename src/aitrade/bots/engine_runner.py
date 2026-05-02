@@ -41,7 +41,9 @@ from aitrade.discovery.scorer import DiscoveredTicker
 from aitrade.discovery.universe import build_universe
 from aitrade.execution.executor import Executor
 from aitrade.execution.orders import OrderRequest, OrderType, Side, TimeInForce
-from aitrade.journal.round_trips import RoundTripReconciler
+from aitrade.journal.narratives import NarrativeGenerator
+from aitrade.journal.round_trips import RoundTripReconciler, TradeRoundTrip
+from aitrade.journal.similarity import SimilarityQuery, SimilarTradesFinder
 from aitrade.logging.trade_logger import EventType, TradeLogger
 from aitrade.market.freshness import StaleDataError, assert_bars_fresh
 from aitrade.market.snapshot import MarketSnapshotFetcher
@@ -125,6 +127,62 @@ def _scan_patterns(symbol: str, daily_bars: list[Bar]) -> list[PatternSignal]:
     return hits
 
 
+def _compact_round_trip(rt: TradeRoundTrip) -> dict[str, Any]:
+    """Compact a closed round-trip into the prompt-friendly shape the
+    floor-trader's ``prior_experience`` field expects.
+
+    Keep it short — three to five short sentences worth of JSON per row,
+    so a top-3 retrieval fits comfortably in the reasoner's context.
+    """
+    snapshot: dict[str, Any] = rt.market_snapshot or {}
+    regime = snapshot.get("regime") if isinstance(snapshot, dict) else None
+    held_h = max(1, rt.holding_secs // 3600)
+    return {
+        "when": rt.entry_ts.strftime("%Y-%m-%d"),
+        "pattern": ", ".join(rt.pattern_hits) if rt.pattern_hits else "n/a",
+        "outcome": f"{rt.pnl_bucket.value} {rt.pnl_pct * 100:+.2f}%",
+        "thesis": rt.entry_thesis or "",
+        "what_happened": (
+            f"Bought {rt.qty:g} @ {rt.entry_price:.2f}, "
+            f"sold @ {rt.exit_price:.2f} ({rt.exit_reason.value}, ~{held_h}h held)"
+        ),
+        "market_then": regime,
+    }
+
+
+def _build_prior_experience(
+    board: CandidateBoard,
+    snapshot_regime: str | None,
+    finder: SimilarTradesFinder | None,
+    *,
+    consider_top_k_candidates: int = 5,
+    per_symbol_top_k: int = 3,
+) -> dict[str, list[dict[str, Any]]]:
+    """For the top-K board candidates, fetch up to ``per_symbol_top_k`` similar
+    past round-trips and project each through ``_compact_round_trip``.
+
+    Empty dict if the finder is None or every candidate yields no matches —
+    that's the correct signal for the floor-trader: "no prior data".
+    """
+    if finder is None:
+        return {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for cand in board.top(consider_top_k_candidates):
+        query = SimilarityQuery(
+            symbol=cand.symbol,
+            pattern_hits=list(cand.pattern_hits),
+            market_regime=snapshot_regime,
+        )
+        try:
+            similar = finder.find(query, top_k=per_symbol_top_k)
+        except Exception as e:  # pragma: no cover — finder is pure SQL+Python
+            logger.warning("similarity find failed for {}: {}", cand.symbol, e)
+            continue
+        if similar:
+            out[cand.symbol] = [_compact_round_trip(rt) for rt in similar]
+    return out
+
+
 def _build_floor_trader_input(
     board: CandidateBoard,
     *,
@@ -134,6 +192,7 @@ def _build_floor_trader_input(
     max_position_usd: float,
     market_snapshot_dump: dict[str, Any],
     multi_tf_dumps: dict[str, dict[str, Any]],
+    prior_experience: dict[str, list[dict[str, Any]]] | None = None,
 ) -> FloorTraderInput:
     return FloorTraderInput(
         candidate_board=[c.to_dict() for c in board.top(10)],
@@ -143,6 +202,7 @@ def _build_floor_trader_input(
         max_position_usd=max_position_usd,
         market_snapshot=market_snapshot_dump,
         multi_tf_snapshots=multi_tf_dumps,
+        prior_experience=prior_experience or {},
     )
 
 
@@ -202,6 +262,8 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
     broker: BrokerClient,
     executor: Executor,
     reasoner: FloorTraderReasoner,
+    similar_finder: SimilarTradesFinder | None,
+    narrative_gen: NarrativeGenerator | None,
     journal: TradeLogger,
     reconciler: RoundTripReconciler,
     cfg: EngineConfig,
@@ -341,6 +403,9 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
         logger.info("empty candidate board; skipping cycle")
         return
 
+    prior_experience = _build_prior_experience(
+        board, snapshot.regime.value, similar_finder
+    )
     decision = reasoner.decide_board(
         _build_floor_trader_input(
             board,
@@ -350,6 +415,7 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
             max_position_usd=executor.risk.max_position_usd,
             market_snapshot_dump=snapshot_dump,
             multi_tf_dumps=multi_tf_dumps,
+            prior_experience=prior_experience,
         )
     )
     if decision is None:
@@ -414,9 +480,14 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
                 "exit_price": rt.exit_price,
             },
         )
+        # Phase 1.5: write a Claude-Haiku post-mortem narrative for the closed
+        # round-trip. Synchronous (~1s/call); idempotent and best-effort, never
+        # raises. Result is queryable via JournalViews + similarity retrieval.
+        if narrative_gen is not None:
+            narrative_gen.write_for(rt)
 
 
-def run_engine(
+def run_engine(  # noqa: PLR0913 — top-level orchestrator, intentional fan-in
     *,
     discovery: DiscoveryAgent | None,
     movers: MoversFinder | None,
@@ -425,6 +496,8 @@ def run_engine(
     broker: BrokerClient,
     executor: Executor,
     reasoner: FloorTraderReasoner,
+    similar_finder: SimilarTradesFinder | None,
+    narrative_gen: NarrativeGenerator | None,
     journal: TradeLogger,
     reconciler: RoundTripReconciler,
     cfg: EngineConfig,
@@ -448,6 +521,8 @@ def run_engine(
                 broker=broker,
                 executor=executor,
                 reasoner=reasoner,
+                similar_finder=similar_finder,
+                narrative_gen=narrative_gen,
                 journal=journal,
                 reconciler=reconciler,
                 cfg=cfg,
