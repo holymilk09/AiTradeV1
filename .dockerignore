@@ -1,0 +1,21 @@
+# Keep the build context lean.
+.git
+.github
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+data/
+logs/
+notebooks/
+tests/
+*.md
+!README.md
+.env
+.env.*
+!.env.example
+.idea
+.vscode
+.DS_Store

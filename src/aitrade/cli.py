@@ -807,5 +807,185 @@ def brief_cmd(
                 console.print(t)
 
 
+@app.command("dashboard")
+def dashboard_cmd(
+    host: str | None = typer.Option(
+        None, "--host", help="Listen address (default from AITRADE_DASHBOARD_HOST)."
+    ),
+    port: int | None = typer.Option(
+        None, "--port", help="Listen port (default from AITRADE_DASHBOARD_PORT)."
+    ),
+) -> None:
+    """Start the mobile-friendly dashboard.
+
+    Requires AITRADE_DASHBOARD_PASSWORD in .env. The dashboard is read-only
+    plus four control buttons: halt / resume / flatten / reconcile. It does
+    NOT run the engine — use `aitrade serve` to run both together, or run
+    this in a second terminal alongside `aitrade engine-paper`.
+    """
+    import uvicorn
+
+    from aitrade.dashboard.app import build_app
+
+    s = get_settings()
+    configure_logging(s.aitrade_log_dir, s.aitrade_log_level)
+    if not s.aitrade_dashboard_password.get_secret_value():
+        console.print(
+            "[red]AITRADE_DASHBOARD_PASSWORD missing.[/red] "
+            "Set a strong password in .env before exposing the dashboard."
+        )
+        raise typer.Exit(code=1)
+
+    fastapi_app = build_app(settings=s)
+    bind_host = host or s.aitrade_dashboard_host
+    bind_port = port or s.aitrade_dashboard_port
+    console.print(
+        f"[cyan]Dashboard listening[/cyan] on http://{bind_host}:{bind_port} — "
+        f"basic-auth password from AITRADE_DASHBOARD_PASSWORD"
+    )
+    uvicorn.run(fastapi_app, host=bind_host, port=bind_port, log_level="warning")
+
+
+@app.command("serve")
+def serve_cmd(
+    duration: str = typer.Option(
+        "24h", "--duration", "-d",
+        help="How long to keep the engine running. Defaults to 24h.",
+    ),
+    cycle_secs: int | None = typer.Option(None, "--cycle-secs"),
+    top_n: int | None = typer.Option(None, "--top-n"),
+    target_notional: float = typer.Option(2_000.0, "--notional"),
+    use_web_discovery: bool = typer.Option(False, "--use-web-discovery/--no-web-discovery"),
+    no_watchlist: bool = typer.Option(False, "--no-watchlist"),
+    no_movers: bool = typer.Option(False, "--no-movers"),
+    host: str | None = typer.Option(None, "--host"),
+    port: int | None = typer.Option(None, "--port"),
+) -> None:
+    """Run the engine + dashboard together in one process.
+
+    The engine runs on a worker thread (the cycle is mostly blocking I/O),
+    the dashboard runs uvicorn on the main thread. This is the recommended
+    way to deploy on a single small VM (fly.io / Railway / DigitalOcean).
+    """
+    import threading
+
+    import uvicorn
+
+    from aitrade.bots.engine_runner import EngineConfig, run_engine
+    from aitrade.brokers.alpaca import build_client
+    from aitrade.calendar.client import EconomicCalendarClient
+    from aitrade.dashboard.app import build_app
+    from aitrade.data.alpaca_data import AlpacaDataClient
+    from aitrade.discovery.agent import DiscoveryAgent
+    from aitrade.discovery.extractor import TickerExtractor, load_alpaca_active_equities
+    from aitrade.discovery.movers import MoversFinder
+    from aitrade.discovery.scorer import BuzzScorer
+    from aitrade.execution.executor import Executor
+    from aitrade.execution.risk import RiskGate
+    from aitrade.journal.narratives import NarrativeGenerator
+    from aitrade.journal.round_trips import RoundTripReconciler
+    from aitrade.journal.similarity import SimilarTradesFinder
+    from aitrade.logging.trade_logger import TradeLogger
+    from aitrade.market.snapshot import MarketSnapshotFetcher
+    from aitrade.news.client import AlpacaNewsClient
+    from aitrade.reasoning.floor_trader import FloorTraderReasoner
+
+    s = get_settings()
+    configure_logging(s.aitrade_log_dir, s.aitrade_log_level)
+    if not s.anthropic_api_key.get_secret_value():
+        console.print("[red]ANTHROPIC_API_KEY missing.[/red] Add it to .env.")
+        raise typer.Exit(code=1)
+    if not s.has_credentials:
+        console.print("[red]Alpaca credentials missing.[/red] Add them to .env.")
+        raise typer.Exit(code=1)
+    if not s.aitrade_dashboard_password.get_secret_value():
+        console.print(
+            "[red]AITRADE_DASHBOARD_PASSWORD missing.[/red] "
+            "Required for `serve` since the dashboard is exposed."
+        )
+        raise typer.Exit(code=1)
+
+    broker = build_client()
+    data = AlpacaDataClient(s)
+    risk = RiskGate(
+        max_position_usd=s.aitrade_max_position_usd,
+        max_daily_loss_usd=s.aitrade_max_daily_loss_usd,
+        max_orders_per_min=s.aitrade_max_orders_per_min,
+        kill_switch_path=Path("KILL_SWITCH"),
+    )
+    exe = Executor(broker, risk)
+    movers = MoversFinder(settings=s) if not no_movers else None
+
+    discovery_agent: DiscoveryAgent | None = None
+    if use_web_discovery:
+        valid = load_alpaca_active_equities(s)
+        extractor = TickerExtractor(valid_tickers=valid)
+        scorer = BuzzScorer()
+        discovery_agent = DiscoveryAgent(settings=s, extractor=extractor, scorer=scorer)
+
+    market_fetcher = MarketSnapshotFetcher(
+        data,
+        ttl_secs=s.aitrade_market_snapshot_ttl_secs,
+        max_stale_secs=s.aitrade_market_snapshot_max_stale_secs,
+    )
+    news_client = AlpacaNewsClient(settings=s)
+    fmp_key = s.fmp_api_key.get_secret_value() or None
+    cal_client = EconomicCalendarClient(api_key=fmp_key) if fmp_key else None
+    reasoner = FloorTraderReasoner(settings=s)
+
+    cfg = EngineConfig(
+        cycle_secs=cycle_secs or s.aitrade_engine_interval_secs,
+        discovery_top_n=top_n or s.aitrade_discovery_top_n,
+        target_notional_per_trade=target_notional,
+        duration=_parse_duration(duration),
+        use_watchlist=not no_watchlist,
+        use_movers=not no_movers,
+        use_web_discovery=use_web_discovery,
+        news_lookback_hours=s.aitrade_news_lookback_hours,
+        news_per_symbol=s.aitrade_news_per_symbol,
+        calendar_days_ahead=s.aitrade_calendar_days_ahead,
+    )
+
+    journal = TradeLogger(log_dir=s.aitrade_log_dir, strategy_id="engine")
+    reconciler = RoundTripReconciler(journal)
+    similar_finder = SimilarTradesFinder(journal)
+    narrative_gen = NarrativeGenerator(journal, settings=s)
+
+    def _engine_loop() -> None:
+        try:
+            run_engine(
+                discovery=discovery_agent,
+                movers=movers,
+                news_client=news_client,
+                cal_client=cal_client,
+                market_fetcher=market_fetcher,
+                data=data,
+                broker=broker,
+                executor=exe,
+                reasoner=reasoner,
+                similar_finder=similar_finder,
+                narrative_gen=narrative_gen,
+                journal=journal,
+                reconciler=reconciler,
+                cfg=cfg,
+            )
+        finally:
+            journal.close()
+
+    engine_thread = threading.Thread(
+        target=_engine_loop, name="aitrade-engine", daemon=True
+    )
+    engine_thread.start()
+
+    fastapi_app = build_app(settings=s)
+    bind_host = host or s.aitrade_dashboard_host
+    bind_port = port or s.aitrade_dashboard_port
+    console.print(
+        f"[cyan]aitrade serve[/cyan] — engine + dashboard on "
+        f"http://{bind_host}:{bind_port} (duration={cfg.duration})"
+    )
+    uvicorn.run(fastapi_app, host=bind_host, port=bind_port, log_level="warning")
+
+
 if __name__ == "__main__":
     app()

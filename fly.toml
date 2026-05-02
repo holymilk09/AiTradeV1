@@ -1,0 +1,66 @@
+# fly.io deploy config for aitrade — single VM running engine + dashboard.
+#
+# First-time setup (one-time):
+#   fly auth login
+#   fly launch --no-deploy --copy-config --name aitrade-<your-suffix>
+#   # Edit `app` below to match the suggested name; fly.io generates one if blank.
+#   fly secrets set \
+#     ALPACA_API_KEY=PK... \
+#     ALPACA_SECRET_KEY=... \
+#     ANTHROPIC_API_KEY=sk-ant-... \
+#     AITRADE_DASHBOARD_PASSWORD=$(openssl rand -base64 24) \
+#     FMP_API_KEY=...   # optional
+#   fly volumes create aitrade_data --size 1 --region <your-region>
+#   fly deploy
+#
+# Subsequent deploys: just `fly deploy` (or push to main if you wire up CI).
+#
+# Dashboard URL: https://<your-app>.fly.dev/  — basic auth, password from secret.
+
+# Edit this to a globally-unique name (or let `fly launch` generate one).
+app = "aitrade"
+primary_region = "iad"  # us-east-1 — closest to NYSE feeds
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  AITRADE_DATA_DIR = "/app/data"
+  AITRADE_LOG_DIR  = "/app/logs"
+  AITRADE_DASHBOARD_HOST = "0.0.0.0"
+  AITRADE_DASHBOARD_PORT = "8080"
+
+# Persistent disk for trade journal + parquet cache. SQLite needs a real disk;
+# fly.io's default ephemeral filesystem would lose every round-trip on restart.
+[mounts]
+  source      = "aitrade_data"
+  destination = "/app/data"
+
+[http_service]
+  internal_port = 8080
+  force_https   = true
+  auto_stop_machines = "stop"   # let fly.io idle the VM if no traffic for N min
+  auto_start_machines = true    # ... and wake it on the next request
+  min_machines_running = 1      # but keep at least one alive so the engine runs
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 25
+    hard_limit = 50
+
+  [[http_service.checks]]
+    grace_period  = "10s"
+    interval      = "30s"
+    method        = "GET"
+    timeout       = "5s"
+    path          = "/healthz"
+
+# Keep the VM small — the bot is mostly waiting on bars + API calls.
+[[vm]]
+  cpu_kind = "shared"
+  cpus     = 1
+  memory   = "512mb"
+
+# Optional: regional secrets, runtime variables — set with `fly secrets set`.
+# Do NOT commit secrets here.

@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     aitrade_news_per_symbol: int = Field(default=3, gt=0)
     aitrade_calendar_days_ahead: int = Field(default=7, gt=0)
 
+    # Phase 3 — mobile dashboard / 24/7 deploy
+    aitrade_dashboard_password: SecretStr = Field(default=SecretStr(""))
+    aitrade_dashboard_host: str = Field(default="0.0.0.0")  # noqa: S104 — fly.io needs 0.0.0.0
+    aitrade_dashboard_port: int = Field(default=8080, gt=0, lt=65536)
+
     @property
     def has_credentials(self) -> bool:
         return bool(
