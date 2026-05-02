@@ -32,6 +32,7 @@ class EventType(str, Enum):
     CANDIDATE_BOARD = "candidate_board"
     MARKET_SNAPSHOT = "market_snapshot"
     FLOOR_TRADER_DECISION = "floor_trader_decision"
+    DEEP_DIG = "deep_dig"
     ROUND_TRIP_CLOSED = "round_trip_closed"
     STALE_DATA_SKIP = "stale_data_skip"
     EMPTY_DISCOVERY = "empty_discovery"

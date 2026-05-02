@@ -50,7 +50,12 @@ FLOOR_TRADER_SYSTEM_PROMPT = (
     "- prior_experience: keyed by candidate symbol, a list of compact past round-trips "
     "the bot took on similar setups (same symbol / shared pattern / same regime). "
     "Each entry has {when, pattern, outcome, thesis, what_happened, market_then}. "
-    "If empty for a symbol, you have no prior data on it — treat the trade as fresh.\n\n"
+    "If empty for a symbol, you have no prior data on it — treat the trade as fresh.\n"
+    "- deep_dig_by_symbol: keyed by candidate symbol, a structured second-opinion "
+    "from a separate analyst persona. Each entry has {bull_case, bear_case, "
+    "risk_factors, confidence_in_setup, recommendation, reasoning}. Use the "
+    "bear_case + risk_factors as a sizing/pass check. The deep-dig analyst is "
+    "advisory — you are still the decider. Empty = no second opinion this cycle.\n\n"
     "Hard rules — never break these:\n"
     "1. Never propose a trade whose target_notional_usd exceeds max_position_usd. Size "
     "smaller when confidence is lower; full size only when confluence is strong.\n"
@@ -70,6 +75,11 @@ FLOOR_TRADER_SYSTEM_PROMPT = (
     "lower confidence or pass; if they were mostly wins, you may upweight. "
     "Reference the experience in your reason_for_pass or thesis when it changes "
     "your mind. Empty = no signal in either direction.\n"
+    "8a. **Cross-check deep_dig_by_symbol if present.** If the second-opinion "
+    "analyst recommends 'pass' on your candidate, you must either justify the "
+    "trade against their bear_case or pass. If they recommend 'watch' and your "
+    "confidence is below 0.7, prefer waiting. Their risk_factors should "
+    "inform sizing — when several risks fire, size smaller or pass.\n"
     "9. **Earnings within 48h** for the picked symbol → pass or size very small. "
     "Earnings can wipe out technical setups. Mention it in reason_for_pass.\n"
     "10. **High-impact macro events same-day** (FOMC, CPI, NFP) → reduce confidence "
@@ -149,6 +159,15 @@ class FloorTraderInput(BaseModel):
             "experience yet — the floor trader should treat the trade as fresh."
         ),
     )
+    deep_dig_by_symbol: dict[str, dict[str, object]] = Field(
+        default_factory=dict,
+        description=(
+            "Phase 4b deep-dig: keyed by top-K candidate symbol, value is a "
+            "compact DeepDigVerdict dump ({bull_case, bear_case, risk_factors, "
+            "confidence_in_setup, recommendation, reasoning}). Empty dict means "
+            "no second opinion was generated this cycle."
+        ),
+    )
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -172,6 +191,7 @@ def _render_floor_user_message(ctx: FloorTraderInput) -> str:
             "economic_calendar": ctx.economic_calendar,
             "upcoming_earnings": ctx.upcoming_earnings,
             "prior_experience": ctx.prior_experience,
+            "deep_dig_by_symbol": ctx.deep_dig_by_symbol,
         },
         indent=2,
         default=str,

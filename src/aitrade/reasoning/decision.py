@@ -7,6 +7,8 @@ these fields and returns structured JSON that validates against
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from aitrade.strategy.indicators import IndicatorSnapshot
@@ -118,4 +120,68 @@ class FloorTraderDecision(BaseModel):
     reason_for_pass: str | None = Field(
         default=None,
         description="Required when should_trade=false — one sentence on why no trade.",
+    )
+
+
+class DeepDigVerdict(BaseModel):
+    """Phase 4b: a structured second-opinion analysis on a single candidate.
+
+    Produced by a Claude Haiku call run on the top-K board candidates each
+    cycle. The verdict is fed back to the floor-trader as part of its
+    context so the final pick reflects an explicit consideration of the
+    bull case, the bear case, and concrete risk factors — not a single
+    pass over the indicator stack.
+
+    All fields cap on length to keep the prompt cheap and the floor-trader
+    context readable. ``recommendation`` is advisory only — the floor-trader
+    is still the single source of truth on whether to trade.
+    """
+
+    symbol: str = Field(description="The candidate symbol this verdict is about.")
+    bull_case: str = Field(
+        max_length=400,
+        description=(
+            "The strongest case FOR the trade in 1-2 sentences. Reference "
+            "concrete signals from the input (pattern, news, regime). No "
+            "filler like 'Stock looks good'."
+        ),
+    )
+    bear_case: str = Field(
+        max_length=400,
+        description=(
+            "The strongest case AGAINST the trade in 1-2 sentences. Reference "
+            "concrete red flags (extension, headline risk, prior failures). "
+            "Required even when bullish — a real desk always has a counter-view."
+        ),
+    )
+    risk_factors: list[str] = Field(
+        default_factory=list,
+        max_length=5,
+        description=(
+            "Up to 5 short bullet-style risk factors the floor-trader should "
+            "size around (e.g. 'Earnings in 3 days', 'RSI extended on 1H'). "
+            "Each ≤ 80 chars."
+        ),
+    )
+    confidence_in_setup: float = Field(
+        ge=0.0,
+        le=1.0,
+        description=(
+            "0..1 confidence that this is a real edge, NOT confidence in "
+            "direction. Below 0.5 means weak signal regardless of bull/bear."
+        ),
+    )
+    recommendation: Literal["trade", "watch", "pass"] = Field(
+        description=(
+            "trade = the setup is strong enough to act on; "
+            "watch = interesting but wait for a better trigger; "
+            "pass = signal too weak or risks too high."
+        ),
+    )
+    reasoning: str = Field(
+        max_length=400,
+        description=(
+            "One short paragraph (3-4 sentences) tying the bull/bear/risks "
+            "together into the recommendation. Plain prose, no markdown."
+        ),
     )

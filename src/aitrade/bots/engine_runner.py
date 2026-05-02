@@ -54,6 +54,7 @@ from aitrade.patterns.base import PatternSignal
 from aitrade.patterns.board import CandidateBoard, build_board
 from aitrade.patterns.registry import get_all_detectors
 from aitrade.reasoning.decision import FloorTraderDecision
+from aitrade.reasoning.deep_dig import DeepDigger
 from aitrade.reasoning.floor_trader import FloorTraderInput, FloorTraderReasoner
 from aitrade.strategy.indicators import compute_multi_tf_snapshot
 from aitrade.strategy.signal import Direction
@@ -86,6 +87,9 @@ class EngineConfig:
     news_lookback_hours: int = 24
     news_per_symbol: int = 3
     calendar_days_ahead: int = 7
+    # Phase 4b — structured second-opinion deep-dig on top-K candidates.
+    use_deep_dig: bool = False
+    deep_dig_top_k: int = 3
 
 
 def _bars_lookback_window(tf: Timeframe, count: int) -> tuple[datetime, datetime]:
@@ -221,6 +225,45 @@ def _build_news_dump(
     }
 
 
+def _build_deep_dig_dump(
+    board: CandidateBoard,
+    digger: DeepDigger | None,
+    *,
+    multi_tf_dumps: dict[str, dict[str, Any]],
+    market_snapshot_dump: dict[str, Any],
+    news_by_symbol: dict[str, list[dict[str, object]]],
+    prior_experience: dict[str, list[dict[str, Any]]],
+    top_k: int = 3,
+) -> dict[str, dict[str, Any]]:
+    """Run the deep-dig digger on the board's top-K candidates.
+
+    Returns ``{symbol: verdict_dump}`` for any candidate whose dig succeeded;
+    failed digs are simply omitted (the floor-trader treats absence as "no
+    second opinion this cycle"). Bounded to ``top_k`` so per-cycle Haiku cost
+    stays predictable regardless of how many candidates surfaced.
+    """
+    if digger is None:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for cand in board.top(min(top_k, digger.max_top_k)):
+        try:
+            verdict = digger.dig(
+                symbol=cand.symbol,
+                pattern_hits=list(cand.pattern_hits),
+                evidence=dict(cand.evidence),
+                multi_tf=multi_tf_dumps.get(cand.symbol, {}),
+                market_snapshot=market_snapshot_dump,
+                news=news_by_symbol.get(cand.symbol, []),
+                prior_experience=prior_experience.get(cand.symbol, []),
+            )
+        except Exception as e:  # pragma: no cover — digger.dig already swallows
+            logger.warning("deep_dig wrapper failed for {}: {}", cand.symbol, e)
+            continue
+        if verdict is not None:
+            out[cand.symbol] = verdict.model_dump(mode="json")
+    return out
+
+
 def _build_calendar_dump(
     cal_client: EconomicCalendarClient | None,
     candidate_symbols: list[str],
@@ -266,6 +309,7 @@ def _build_floor_trader_input(  # noqa: PLR0913 — explicit context fan-in
     news_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
     economic_calendar: list[dict[str, Any]] | None = None,
     upcoming_earnings: list[dict[str, Any]] | None = None,
+    deep_dig_by_symbol: dict[str, dict[str, Any]] | None = None,
 ) -> FloorTraderInput:
     return FloorTraderInput(
         candidate_board=[c.to_dict() for c in board.top(10)],
@@ -279,6 +323,7 @@ def _build_floor_trader_input(  # noqa: PLR0913 — explicit context fan-in
         news_by_symbol=news_by_symbol or {},
         economic_calendar=economic_calendar or [],
         upcoming_earnings=upcoming_earnings or [],
+        deep_dig_by_symbol=deep_dig_by_symbol or {},
     )
 
 
@@ -336,6 +381,7 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
     reddit: RedditDiscoveryClient | None,
     news_client: AlpacaNewsClient | None,
     cal_client: EconomicCalendarClient | None,
+    digger: DeepDigger | None,
     market_fetcher: MarketSnapshotFetcher,
     data: AlpacaDataClient,
     broker: BrokerClient,
@@ -498,6 +544,21 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
     econ_events, earn_events = _build_calendar_dump(
         cal_client, candidate_symbols, days_ahead=cfg.calendar_days_ahead
     )
+    deep_dig_dump = _build_deep_dig_dump(
+        board,
+        digger if cfg.use_deep_dig else None,
+        multi_tf_dumps=multi_tf_dumps,
+        market_snapshot_dump=snapshot_dump,
+        news_by_symbol=news_dump,
+        prior_experience=prior_experience,
+        top_k=cfg.deep_dig_top_k,
+    )
+    if deep_dig_dump:
+        journal.record(
+            EventType.DEEP_DIG,
+            symbol="-",
+            payload={"verdicts": deep_dig_dump},
+        )
     decision = reasoner.decide_board(
         _build_floor_trader_input(
             board,
@@ -511,6 +572,7 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
             news_by_symbol=news_dump,
             economic_calendar=econ_events,
             upcoming_earnings=earn_events,
+            deep_dig_by_symbol=deep_dig_dump,
         )
     )
     if decision is None:
@@ -589,6 +651,7 @@ def run_engine(  # noqa: PLR0913 — top-level orchestrator, intentional fan-in
     reddit: RedditDiscoveryClient | None,
     news_client: AlpacaNewsClient | None,
     cal_client: EconomicCalendarClient | None,
+    digger: DeepDigger | None,
     market_fetcher: MarketSnapshotFetcher,
     data: AlpacaDataClient,
     broker: BrokerClient,
@@ -617,6 +680,7 @@ def run_engine(  # noqa: PLR0913 — top-level orchestrator, intentional fan-in
                 reddit=reddit,
                 news_client=news_client,
                 cal_client=cal_client,
+                digger=digger,
                 market_fetcher=market_fetcher,
                 data=data,
                 broker=broker,
