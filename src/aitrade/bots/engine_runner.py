@@ -42,7 +42,14 @@ from aitrade.discovery.reddit import RedditDiscoveryClient
 from aitrade.discovery.scorer import DiscoveredTicker
 from aitrade.discovery.universe import build_universe
 from aitrade.execution.executor import Executor
-from aitrade.execution.orders import OrderRequest, OrderType, Side, TimeInForce
+from aitrade.execution.exits import StopPlan, compute_stop_plan
+from aitrade.execution.orders import (
+    OrderClass,
+    OrderRequest,
+    OrderType,
+    Side,
+    TimeInForce,
+)
 from aitrade.journal.narratives import NarrativeGenerator
 from aitrade.journal.round_trips import RoundTripReconciler, TradeRoundTrip
 from aitrade.journal.similarity import SimilarityQuery, SimilarTradesFinder
@@ -53,6 +60,7 @@ from aitrade.news.client import AlpacaNewsClient
 from aitrade.patterns.base import PatternSignal
 from aitrade.patterns.board import CandidateBoard, build_board
 from aitrade.patterns.registry import get_all_detectors
+from aitrade.patterns.trend_hunter import TrendHunter, TrendScore
 from aitrade.reasoning.decision import FloorTraderDecision
 from aitrade.reasoning.deep_dig import DeepDigger
 from aitrade.reasoning.floor_trader import FloorTraderInput, FloorTraderReasoner
@@ -90,6 +98,9 @@ class EngineConfig:
     # Phase 4b — structured second-opinion deep-dig on top-K candidates.
     use_deep_dig: bool = False
     deep_dig_top_k: int = 3
+    # Phase 5 — TrendHunter scan on every candidate. Cheap (deterministic
+    # math on bars we already have); on by default.
+    use_trend_hunter: bool = True
 
 
 def _bars_lookback_window(tf: Timeframe, count: int) -> tuple[datetime, datetime]:
@@ -327,14 +338,58 @@ def _build_floor_trader_input(  # noqa: PLR0913 — explicit context fan-in
     )
 
 
+def _resolve_stop_plan(
+    decision: FloorTraderDecision,
+    *,
+    side: Side,
+    reference_price: float,
+    daily_atr: float | None,
+    vix: float | None,
+) -> StopPlan | None:
+    """Pick a stop/target plan: absolute prices win when set, else ATR-derived.
+
+    Returns ``None`` only when the decision asks for dynamic ATR sizing but
+    the candidate has no daily ATR or the resulting plan fails the engine's
+    R:R floor — both legitimate "skip this trade" signals.
+    """
+    # Absolute prices win when the floor-trader chose a structural level.
+    if decision.stop_price is not None and decision.target_price is not None:
+        return StopPlan(
+            stop_loss_price=float(decision.stop_price),
+            take_profit_price=float(decision.target_price),
+            trail_percent=0.0,
+            rationale="structural-level (absolute) stop/target",
+        )
+    # Otherwise resolve ATR multiples — defaults pin to 1.5x stop / 3.0x target.
+    if daily_atr is None:
+        return None
+    stop_mult = decision.stop_atr_mult or 1.5
+    target_mult = decision.target_atr_mult or 3.0
+    return compute_stop_plan(
+        entry_price=reference_price,
+        atr=daily_atr,
+        side=side,
+        stop_atr_mult=stop_mult,
+        target_atr_mult=target_mult,
+        vix=vix,
+        enable_trailing=True,
+    )
+
+
 def _decision_to_order(
     decision: FloorTraderDecision,
     *,
     held_qty: float,
     reference_price: float,
     target_notional: float,
-) -> OrderRequest | None:
-    """Translate a floor-trader decision into an Alpaca order, or None."""
+    daily_atr: float | None = None,
+    vix: float | None = None,
+) -> tuple[OrderRequest, StopPlan | None] | None:
+    """Translate a floor-trader decision into a (parent order, stop plan) pair.
+
+    The parent is a market order; ``StopPlan`` is non-None for fresh entries
+    where exits should be bracketed. ``None`` means "no order this cycle".
+    """
     if not decision.should_trade or decision.pick_symbol is None:
         return None
     if reference_price <= 0:
@@ -344,7 +399,7 @@ def _decision_to_order(
     if decision.direction is Direction.FLAT:
         if held_qty <= 0:
             return None
-        return OrderRequest(
+        order = OrderRequest(
             symbol=decision.pick_symbol,
             side=Side.SELL,
             qty=held_qty,
@@ -352,6 +407,7 @@ def _decision_to_order(
             time_in_force=TimeInForce.DAY,
             strategy_id="floor_trader",
         )
+        return order, None  # closing — no bracket needed
 
     if decision.direction is Direction.LONG:
         notional = min(decision.target_notional_usd or target_notional, target_notional)
@@ -359,14 +415,46 @@ def _decision_to_order(
         delta = desired_qty - held_qty
         if abs(delta) < 1:
             return None
-        return OrderRequest(
-            symbol=decision.pick_symbol,
-            side=Side.BUY if delta > 0 else Side.SELL,
-            qty=abs(delta),
-            order_type=OrderType.MARKET,
-            time_in_force=TimeInForce.DAY,
-            strategy_id="floor_trader",
-        )
+        side = Side.BUY if delta > 0 else Side.SELL
+        # Only bracket fresh entries (BUY when adding) — closes use simple sells.
+        plan: StopPlan | None = None
+        if side is Side.BUY and held_qty <= 0:
+            plan = _resolve_stop_plan(
+                decision,
+                side=Side.BUY,
+                reference_price=reference_price,
+                daily_atr=daily_atr,
+                vix=vix,
+            )
+            if plan is None:
+                # ATR-mode but no usable plan (no ATR, R:R too low). Refuse.
+                logger.info(
+                    "skipping {}: dynamic stop plan unavailable or below R:R floor",
+                    decision.pick_symbol,
+                )
+                return None
+        if plan is not None:
+            order = OrderRequest(
+                symbol=decision.pick_symbol,
+                side=side,
+                qty=abs(delta),
+                order_type=OrderType.MARKET,
+                time_in_force=TimeInForce.DAY,
+                strategy_id="floor_trader",
+                order_class=OrderClass.BRACKET,
+                stop_loss_price=plan.stop_loss_price,
+                take_profit_price=plan.take_profit_price,
+            )
+        else:
+            order = OrderRequest(
+                symbol=decision.pick_symbol,
+                side=side,
+                qty=abs(delta),
+                order_type=OrderType.MARKET,
+                time_in_force=TimeInForce.DAY,
+                strategy_id="floor_trader",
+            )
+        return order, plan
 
     # SHORT explicitly unsupported in v1.
     logger.info("floor trader requested {} for {}; v1 is long-only — skipping",
@@ -382,6 +470,7 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
     news_client: AlpacaNewsClient | None,
     cal_client: EconomicCalendarClient | None,
     digger: DeepDigger | None,
+    trend_hunter: TrendHunter | None,
     market_fetcher: MarketSnapshotFetcher,
     data: AlpacaDataClient,
     broker: BrokerClient,
@@ -449,12 +538,15 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
         "session": snapshot.session,
         "fetched_at": snapshot.fetched_at.isoformat(),
         "age_secs": round(snapshot.age_secs(), 2),
+        "sector_changes_pct": dict(snapshot.sector_changes_pct),
     }
     journal.record(EventType.MARKET_SNAPSHOT, symbol="-", payload=snapshot_dump)
 
-    # Per-symbol scan: bars → MTF → patterns.
+    # Per-symbol scan: bars → MTF → patterns → trend.
     patterns_by_symbol: dict[str, list[PatternSignal]] = {}
+    trend_by_symbol: dict[str, TrendScore] = {}
     last_price_by_symbol: dict[str, float] = {}
+    daily_atr_by_symbol: dict[str, float] = {}
     multi_tf_dumps: dict[str, dict[str, Any]] = {}
 
     for ticker in discovered:
@@ -479,6 +571,10 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
             logger.warning("MTF snapshot failed for {}: {}", sym, e)
             continue
         multi_tf_dumps[sym] = mtf.as_dict()
+        # Capture daily ATR for downstream dynamic-stop sizing.
+        daily_snap = mtf.per_tf.get(Timeframe.DAY_1)
+        if daily_snap is not None and daily_snap.atr_14 is not None:
+            daily_atr_by_symbol[sym] = daily_snap.atr_14
 
         hits = _scan_patterns(sym, daily_bars)
         if hits:
@@ -499,6 +595,16 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
                 },
             )
 
+        # Phase 5: deterministic multi-criteria trend score per symbol.
+        if trend_hunter is not None:
+            try:
+                ts = trend_hunter.compute(daily_bars)
+            except Exception as e:  # pragma: no cover — pure function, defensive
+                logger.warning("trend_hunter raised on {}: {}", sym, e)
+                ts = None
+            if ts is not None and ts.score > 0:
+                trend_by_symbol[sym] = ts
+
     # Account state.
     account = broker.get_account()
     positions = broker.get_positions()
@@ -516,6 +622,7 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
     board = build_board(
         discovered,
         patterns_by_symbol,
+        trend_by_symbol=trend_by_symbol,
         held_qty_by_symbol=held_qty_by_symbol,
         last_price_by_symbol=last_price_by_symbol,
         cash_available=account.cash,
@@ -599,15 +706,35 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
         logger.warning("no reference price for picked symbol {}", sym)
         return
 
-    order = _decision_to_order(
+    order_plan = _decision_to_order(
         decision,
         held_qty=held_qty,
         reference_price=reference_price,
         target_notional=cfg.target_notional_per_trade,
+        daily_atr=daily_atr_by_symbol.get(sym),
+        vix=snapshot.vix,
     )
-    if order is None:
+    if order_plan is None:
         logger.info("no order needed (already at target or unsupported direction)")
         return
+    order, stop_plan = order_plan
+
+    if stop_plan is not None:
+        journal.record(
+            EventType.STOP_PLAN,
+            symbol=sym,
+            payload={
+                "stop_loss_price": stop_plan.stop_loss_price,
+                "take_profit_price": stop_plan.take_profit_price,
+                "trail_percent": stop_plan.trail_percent,
+                "rationale": stop_plan.rationale,
+                "reward_risk": round(
+                    stop_plan.reward_risk_ratio(reference_price, order.side), 3
+                ),
+                "atr": daily_atr_by_symbol.get(sym),
+                "vix": snapshot.vix,
+            },
+        )
 
     journal.log_submit(order)
     result = executor.submit(
@@ -652,6 +779,7 @@ def run_engine(  # noqa: PLR0913 — top-level orchestrator, intentional fan-in
     news_client: AlpacaNewsClient | None,
     cal_client: EconomicCalendarClient | None,
     digger: DeepDigger | None,
+    trend_hunter: TrendHunter | None,
     market_fetcher: MarketSnapshotFetcher,
     data: AlpacaDataClient,
     broker: BrokerClient,
@@ -681,6 +809,7 @@ def run_engine(  # noqa: PLR0913 — top-level orchestrator, intentional fan-in
                 news_client=news_client,
                 cal_client=cal_client,
                 digger=digger,
+                trend_hunter=trend_hunter,
                 market_fetcher=market_fetcher,
                 data=data,
                 broker=broker,

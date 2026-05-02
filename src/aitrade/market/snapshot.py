@@ -35,6 +35,23 @@ _NY = ZoneInfo("America/New_York")
 _DEFAULT_VIX = 18.0
 _VIX_PROXY_SYMBOL = "VIXY"
 
+# SPDR sector ETFs — the standard "what's leading the market" basket.
+# Keys are the ETF symbol; values are the human-readable sector label so the
+# floor-trader prompt can interpret them without a translation step.
+_SECTOR_ETFS: dict[str, str] = {
+    "XLK": "technology",
+    "XLF": "financials",
+    "XLE": "energy",
+    "XLV": "healthcare",
+    "XLI": "industrials",
+    "XLY": "consumer_discretionary",
+    "XLP": "consumer_staples",
+    "XLU": "utilities",
+    "XLB": "materials",
+    "XLRE": "real_estate",
+    "XLC": "communications",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class MarketSnapshot:
@@ -43,6 +60,11 @@ class MarketSnapshot:
     All prices and pct-changes use the latest two daily closes available at
     fetch time. ``session`` is computed from ``fetched_at`` translated to
     ``America/New_York``.
+
+    ``sector_changes_pct`` maps each SPDR sector ETF symbol (XLK, XLF, ...)
+    to its 1-day pct change. A breakout in NVDA confirmed by XLK leading is
+    very different from one fading into a flat tech sector — surfacing this
+    to the floor-trader lets it weight sector rotation explicitly.
     """
 
     spy_price: float
@@ -53,6 +75,7 @@ class MarketSnapshot:
     regime: Regime
     session: str
     fetched_at: datetime
+    sector_changes_pct: dict[str, float] = field(default_factory=dict)
 
     def age_secs(self, now: datetime | None = None) -> float:
         """Return how many seconds ago this snapshot was fetched."""
@@ -151,12 +174,13 @@ class MarketSnapshotFetcher:
         return snapshot
 
     def _fetch_fresh(self, now: datetime) -> MarketSnapshot:
-        """Pull SPY/QQQ/VIX-proxy daily bars and assemble the snapshot."""
+        """Pull SPY/QQQ/VIX-proxy + sector ETFs and assemble the snapshot."""
 
         start = now - timedelta(days=10)
         spy_price, spy_change = self._latest_two_close_change("SPY", start, now)
         qqq_price, qqq_change = self._latest_two_close_change("QQQ", start, now)
         vix = self._fetch_vix(start, now)
+        sectors = self._fetch_sectors(start, now)
 
         return MarketSnapshot(
             spy_price=spy_price,
@@ -167,7 +191,30 @@ class MarketSnapshotFetcher:
             regime=classify_regime(spy_change, vix),
             session=_detect_session(now),
             fetched_at=now,
+            sector_changes_pct=sectors,
         )
+
+    def _fetch_sectors(
+        self, start: datetime, end: datetime
+    ) -> dict[str, float]:
+        """Best-effort sector ETF reads. Per-ETF failure drops just that key.
+
+        Returns a partial dict on partial failure — sector breadth is useful
+        even if one ETF couldn't be read. Empty dict only on total failure
+        (which the cycle still proceeds with; floor-trader sees no sector
+        info this cycle).
+        """
+        out: dict[str, float] = {}
+        for symbol in _SECTOR_ETFS:
+            try:
+                _, pct = self._latest_two_close_change(symbol, start, end)
+            except Exception as exc:  # noqa: BLE001 — per-ETF best-effort
+                logger.debug(
+                    "sector ETF {} unavailable ({}); skipping", symbol, exc
+                )
+                continue
+            out[symbol] = round(pct, 3)
+        return out
 
     def _latest_two_close_change(
         self,

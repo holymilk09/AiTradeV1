@@ -79,8 +79,21 @@ def _df(closes: list[float]) -> pd.DataFrame:
     return pd.DataFrame({"close": closes}, index=idx)
 
 
-def _wire_mock(mock: MagicMock, *, vix_close: float | None = 19.0) -> None:
-    """Set up the mock data client to return canned daily bars per symbol."""
+def _wire_mock(
+    mock: MagicMock,
+    *,
+    vix_close: float | None = 19.0,
+    sector_pcts: dict[str, float] | None = None,
+) -> None:
+    """Set up the mock data client to return canned daily bars per symbol.
+
+    SPY/QQQ/VIXY have fixed canned series. Sector ETFs return per-symbol
+    canned series when the test passes ``sector_pcts``; otherwise sector
+    fetches return an empty frame (treated as a per-ETF best-effort miss
+    by the fetcher).
+    """
+
+    sector_pcts = sector_pcts or {}
 
     def side_effect(
         symbol: str,
@@ -97,7 +110,11 @@ def _wire_mock(mock: MagicMock, *, vix_close: float | None = 19.0) -> None:
             if vix_close is None:
                 return pd.DataFrame()
             return _df([vix_close - 1, vix_close])
-        raise AssertionError(f"unexpected symbol {symbol}")
+        if symbol in sector_pcts:
+            base = 100.0
+            return _df([base, base * (1.0 + sector_pcts[symbol] / 100.0)])
+        # Unknown sector ETF — return empty (per-ETF best-effort miss).
+        return pd.DataFrame()
 
     mock.fetch_stock_bars.side_effect = side_effect
 
@@ -127,6 +144,37 @@ def test_fetch_uses_default_vix_when_proxy_unavailable() -> None:
     assert snap.vix == 18.0
 
 
+def test_fetch_includes_sector_etf_changes() -> None:
+    """Phase 5: SPDR sector ETF pct changes ride along on the snapshot."""
+    data = MagicMock()
+    _wire_mock(
+        data,
+        sector_pcts={"XLK": 1.2, "XLF": -0.4, "XLE": 0.0},
+    )
+    fetcher = MarketSnapshotFetcher(data=data)
+
+    snap = fetcher.fetch()
+
+    # Sectors that returned canned bars are present with their pct change;
+    # sectors that returned empty frames are dropped (best-effort per ETF).
+    assert snap.sector_changes_pct["XLK"] == pytest.approx(1.2)
+    assert snap.sector_changes_pct["XLF"] == pytest.approx(-0.4)
+    assert snap.sector_changes_pct["XLE"] == pytest.approx(0.0)
+    # Unwired sectors must not be present.
+    assert "XLU" not in snap.sector_changes_pct
+
+
+def test_fetch_tolerates_total_sector_failure() -> None:
+    """A failure to fetch *every* sector still yields a valid snapshot."""
+    data = MagicMock()
+    _wire_mock(data)  # no sector_pcts → all sectors return empty
+    fetcher = MarketSnapshotFetcher(data=data)
+    snap = fetcher.fetch()
+    assert snap.sector_changes_pct == {}
+    # Other fields still populated normally.
+    assert snap.spy_change_pct == pytest.approx(1.0)
+
+
 def test_cache_hit_within_ttl() -> None:
     data = MagicMock()
     _wire_mock(data)
@@ -135,8 +183,13 @@ def test_cache_hit_within_ttl() -> None:
     first = fetcher.fetch()
     second = fetcher.fetch()
     assert first is second
-    # SPY + QQQ + VIXY = 3 calls only on the first fetch
-    assert data.fetch_stock_bars.call_count == 3
+    # First fetch hits SPY + QQQ + VIXY + 11 sector ETFs = 14 calls.
+    # Cache hit on the second fetch leaves call_count untouched.
+    initial_calls = data.fetch_stock_bars.call_count
+    assert initial_calls > 3  # picked up sector ETFs too
+    # Second fetch was a pure cache hit — no new calls.
+    fetcher.fetch()
+    assert data.fetch_stock_bars.call_count == initial_calls
 
 
 def test_cache_miss_after_ttl_elapses() -> None:
@@ -145,6 +198,7 @@ def test_cache_miss_after_ttl_elapses() -> None:
     fetcher = MarketSnapshotFetcher(data=data, ttl_secs=30)
 
     first = fetcher.fetch()
+    initial_calls = data.fetch_stock_bars.call_count
     # Backdate the cached snapshot to look TTL-stale.
     object.__setattr__(
         first, "fetched_at", first.fetched_at - timedelta(seconds=120)
@@ -152,7 +206,8 @@ def test_cache_miss_after_ttl_elapses() -> None:
     second = fetcher.fetch()
 
     assert second is not first
-    assert data.fetch_stock_bars.call_count == 6  # second fetch repeated all 3 calls
+    # Second fetch must repeat the full set of underlying calls.
+    assert data.fetch_stock_bars.call_count == initial_calls * 2
 
 
 def test_force_refresh_bypasses_cache() -> None:
@@ -161,8 +216,10 @@ def test_force_refresh_bypasses_cache() -> None:
     fetcher = MarketSnapshotFetcher(data=data, ttl_secs=300)
 
     fetcher.fetch()
+    initial_calls = data.fetch_stock_bars.call_count
     fetcher.fetch(force_refresh=True)
-    assert data.fetch_stock_bars.call_count == 6
+    # Forced refetch repeats the full set.
+    assert data.fetch_stock_bars.call_count == initial_calls * 2
 
 
 def test_stale_fallback_within_max_stale_secs() -> None:

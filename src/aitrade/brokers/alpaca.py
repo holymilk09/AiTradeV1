@@ -14,6 +14,7 @@ from aitrade.brokers.base import AccountSummary, BrokerClient, Position
 from aitrade.config import Settings, assert_paper_or_unlocked, get_settings
 from aitrade.execution.orders import (
     OrderAck,
+    OrderClass,
     OrderRequest,
     OrderStatus,
     OrderType,
@@ -67,21 +68,82 @@ class AlpacaBroker(BrokerClient):
             for p in self._client.get_all_positions()
         ]
 
+    def is_tradable(self, symbol: str) -> bool:
+        """Pre-flight halt / delisting check.
+
+        Returns True only when the symbol is *currently* tradable — not
+        halted, not delisted, not deactivated. False in any other state
+        including network failure (fail-closed: when in doubt, don't trade).
+        """
+        try:
+            asset = self._client.get_asset(symbol)
+        except Exception as exc:
+            logger.warning(
+                "is_tradable get_asset failed symbol={} err={}; failing closed",
+                symbol,
+                exc,
+            )
+            return False
+        tradable = bool(getattr(asset, "tradable", False))
+        status = str(getattr(asset, "status", "")).lower()
+        # Alpaca's status enum is "active" / "inactive". Any non-active means
+        # delisted, suspended, or otherwise unsafe to send to.
+        return tradable and status == "active"
+
     def submit_order(self, order: OrderRequest) -> OrderAck:
         from alpaca.trading.enums import OrderSide as AlpacaSide
         from alpaca.trading.enums import TimeInForce as AlpacaTIF
-        from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
+        from alpaca.trading.requests import (
+            LimitOrderRequest,
+            MarketOrderRequest,
+            TakeProfitRequest,
+            TrailingStopOrderRequest,
+        )
 
         side = AlpacaSide.BUY if order.side is Side.BUY else AlpacaSide.SELL
         tif = AlpacaTIF(order.time_in_force.value)
 
-        if order.order_type is OrderType.MARKET:
+        # Bracket / OTO / OCO support — attach stop-loss + take-profit to the
+        # parent so Alpaca manages exits server-side. Critical for unattended
+        # overnight runs: even if our process dies, the broker still flat-
+        # tens at the stop or target.
+        order_class = self._map_order_class(order.order_class)
+        bracket_kwargs: dict[str, object] = {}
+        if order_class is not None:
+            from alpaca.trading.requests import StopLossRequest
+
+            if order.stop_loss_price is not None:
+                bracket_kwargs["stop_loss"] = StopLossRequest(
+                    stop_price=float(order.stop_loss_price)
+                )
+            if order.take_profit_price is not None:
+                bracket_kwargs["take_profit"] = TakeProfitRequest(
+                    limit_price=float(order.take_profit_price)
+                )
+            bracket_kwargs["order_class"] = order_class
+
+        if order.order_type is OrderType.TRAILING_STOP:
+            if order.trail_percent is None and order.trail_price is None:
+                raise ValueError(
+                    "trail_percent or trail_price required for TRAILING_STOP orders"
+                )
+            req = TrailingStopOrderRequest(
+                symbol=order.symbol,
+                qty=order.qty,
+                side=side,
+                time_in_force=tif,
+                trail_percent=order.trail_percent,
+                trail_price=order.trail_price,
+                client_order_id=order.client_order_id,
+            )
+        elif order.order_type is OrderType.MARKET:
             req = MarketOrderRequest(
                 symbol=order.symbol,
                 qty=order.qty,
                 side=side,
                 time_in_force=tif,
                 client_order_id=order.client_order_id,
+                **bracket_kwargs,
             )
         else:
             if order.limit_price is None:
@@ -93,16 +155,18 @@ class AlpacaBroker(BrokerClient):
                 time_in_force=tif,
                 limit_price=order.limit_price,
                 client_order_id=order.client_order_id,
+                **bracket_kwargs,
             )
 
         submitted = self._client.submit_order(order_data=req)
         status = _STATUS_MAP.get(str(submitted.status).lower(), OrderStatus.NEW)
         logger.info(
-            "order submitted symbol={} side={} qty={} type={} status={} id={}",
+            "order submitted symbol={} side={} qty={} type={} class={} status={} id={}",
             order.symbol,
             order.side.value,
             order.qty,
             order.order_type.value,
+            order.order_class.value,
             status.value,
             submitted.id,
         )
@@ -111,6 +175,17 @@ class AlpacaBroker(BrokerClient):
             broker_order_id=str(submitted.id),
             status=status,
         )
+
+    @staticmethod
+    def _map_order_class(oc: OrderClass) -> object | None:
+        """Translate our OrderClass to Alpaca's enum, or None for SIMPLE."""
+        from alpaca.trading.enums import OrderClass as AlpacaOrderClass
+
+        return {
+            OrderClass.BRACKET: AlpacaOrderClass.BRACKET,
+            OrderClass.OTO: AlpacaOrderClass.OTO,
+            OrderClass.OCO: AlpacaOrderClass.OCO,
+        }.get(oc)
 
     def cancel_order(self, broker_order_id: str) -> None:
         self._client.cancel_order_by_id(broker_order_id)

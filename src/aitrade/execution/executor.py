@@ -34,6 +34,24 @@ class Executor:
         reference_price: float,
         current_position_qty: float = 0.0,
     ) -> SubmitResult:
+        # Halt / delisting check before risk gate. Cheap (one cached
+        # asset lookup) and short-circuits sending to a halted ticker —
+        # which Alpaca would reject with a confusing error after the
+        # risk-budget tick has already fired.
+        try:
+            tradable = self._broker.is_tradable(order.symbol)
+        except Exception as exc:
+            logger.warning(
+                "is_tradable raised symbol={} err={}; failing closed",
+                order.symbol,
+                exc,
+            )
+            tradable = False
+        if not tradable:
+            reason = f"symbol {order.symbol} not tradable (halted/delisted)"
+            logger.warning("order blocked: {}", reason)
+            return SubmitResult(False, reason)
+
         decision = self._risk.check(
             order,
             reference_price=reference_price,

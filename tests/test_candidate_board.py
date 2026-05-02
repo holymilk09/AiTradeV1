@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from aitrade.discovery.scorer import DiscoveredTicker
 from aitrade.patterns.base import PatternSignal
 from aitrade.patterns.board import build_board
+from aitrade.patterns.trend_hunter import TrendScore
 from aitrade.strategy.signal import Direction
 
 
@@ -118,3 +119,55 @@ def test_to_dict_is_json_friendly() -> None:
 def test_built_at_default_is_recent() -> None:
     board = build_board([_ticker("X", buzz=1.0)], {"X": [_signal("X", "breakout", 0.5)]})
     assert (datetime.now(UTC) - board.built_at) < timedelta(seconds=5)
+
+
+# ----- Phase 5 — trend score in the combined score ----------------------------
+
+
+def _trend(score: float, direction: Direction = Direction.LONG) -> TrendScore:
+    return TrendScore(
+        score=score,
+        direction=direction,
+        components={"ma_stack": score, "higher_highs_lows": score},
+    )
+
+
+def test_trend_score_breaks_ties_when_buzz_and_pattern_equal() -> None:
+    """Two candidates with identical buzz + pattern; the one with higher
+    trend_score must rank first."""
+    discovered = [_ticker("TRND", buzz=1.0), _ticker("CHOP", buzz=1.0)]
+    patterns = {
+        "TRND": [_signal("TRND", "breakout", 0.5)],
+        "CHOP": [_signal("CHOP", "breakout", 0.5)],
+    }
+    trends = {
+        "TRND": _trend(0.85, Direction.LONG),
+        "CHOP": _trend(0.20, Direction.FLAT),
+    }
+    board = build_board(discovered, patterns, trend_by_symbol=trends)
+    assert [c.symbol for c in board.candidates] == ["TRND", "CHOP"]
+    trnd = next(c for c in board.candidates if c.symbol == "TRND")
+    assert trnd.trend_score == 0.85
+    assert trnd.trend_direction is Direction.LONG
+
+
+def test_symbol_with_only_trend_signal_is_kept() -> None:
+    """A symbol surfacing on the trend lane alone (no buzz, no patterns) still
+    appears on the board — TrendHunter is a first-class lane."""
+    trends = {"TRND": _trend(0.9, Direction.LONG)}
+    board = build_board([], {}, trend_by_symbol=trends)
+    assert len(board.candidates) == 1
+    assert board.candidates[0].symbol == "TRND"
+    assert board.candidates[0].trend_score == 0.9
+
+
+def test_trend_evidence_components_serialized() -> None:
+    discovered = [_ticker("AAA", buzz=1.0)]
+    patterns = {"AAA": [_signal("AAA", "breakout", 0.5)]}
+    trends = {"AAA": _trend(0.75, Direction.LONG)}
+    board = build_board(discovered, patterns, trend_by_symbol=trends)
+    cand = board.candidates[0]
+    assert "trend_z" in cand.evidence
+    assert "raw_trend" in cand.evidence
+    assert cand.evidence["trend_components"] == {"ma_stack": 0.75, "higher_highs_lows": 0.75}
+    assert cand.evidence["trend_is_strong"] is True

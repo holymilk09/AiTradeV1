@@ -491,6 +491,12 @@ def engine_paper(
         help="Add a Claude Haiku second-opinion (bull/bear/risks/rec) on the "
         "top-K candidates. Off by default — adds ~$0.003/cycle in Haiku tokens.",
     ),
+    no_trend_hunter: bool = typer.Option(
+        False,
+        "--no-trend-hunter",
+        help="Disable the deterministic TrendHunter scoring lane. "
+        "On by default — it's free (no LLM, just bar math).",
+    ),
     no_watchlist: bool = typer.Option(
         False, "--no-watchlist", help="Disable the static watchlist source."
     ),
@@ -522,6 +528,7 @@ def engine_paper(
     from aitrade.logging.trade_logger import TradeLogger
     from aitrade.market.snapshot import MarketSnapshotFetcher
     from aitrade.news.client import AlpacaNewsClient
+    from aitrade.patterns.trend_hunter import TrendHunter
     from aitrade.reasoning.deep_dig import DeepDigger
     from aitrade.reasoning.floor_trader import FloorTraderReasoner
 
@@ -581,6 +588,7 @@ def engine_paper(
     cal_client = EconomicCalendarClient(api_key=fmp_key) if fmp_key else None
     reasoner = FloorTraderReasoner(settings=s)
     digger = DeepDigger(settings=s) if use_deep_dig else None
+    trend_hunter = None if no_trend_hunter else TrendHunter()
 
     cfg = EngineConfig(
         cycle_secs=cycle_secs or s.aitrade_engine_interval_secs,
@@ -595,6 +603,7 @@ def engine_paper(
         news_per_symbol=s.aitrade_news_per_symbol,
         calendar_days_ahead=s.aitrade_calendar_days_ahead,
         use_deep_dig=use_deep_dig,
+        use_trend_hunter=not no_trend_hunter,
     )
 
     with TradeLogger(log_dir=s.aitrade_log_dir, strategy_id="engine") as journal:
@@ -617,6 +626,8 @@ def engine_paper(
             enrichment.append("calendar")
         if digger is not None:
             enrichment.append("deep_dig")
+        if trend_hunter is not None:
+            enrichment.append("trend_hunter")
         console.print(
             f"[cyan]Engine starting[/cyan]: cycle={cfg.cycle_secs}s "
             f"top_n={cfg.discovery_top_n} notional=${cfg.target_notional_per_trade:.0f} "
@@ -630,6 +641,7 @@ def engine_paper(
             news_client=news_client,
             cal_client=cal_client,
             digger=digger,
+            trend_hunter=trend_hunter,
             market_fetcher=market_fetcher,
             data=data,
             broker=broker,
@@ -901,6 +913,7 @@ def serve_cmd(
         False, "--use-reddit-discovery/--no-reddit-discovery"
     ),
     use_deep_dig: bool = typer.Option(False, "--use-deep-dig/--no-deep-dig"),
+    no_trend_hunter: bool = typer.Option(False, "--no-trend-hunter"),
     no_watchlist: bool = typer.Option(False, "--no-watchlist"),
     no_movers: bool = typer.Option(False, "--no-movers"),
     host: str | None = typer.Option(None, "--host"),
@@ -934,6 +947,7 @@ def serve_cmd(
     from aitrade.logging.trade_logger import TradeLogger
     from aitrade.market.snapshot import MarketSnapshotFetcher
     from aitrade.news.client import AlpacaNewsClient
+    from aitrade.patterns.trend_hunter import TrendHunter
     from aitrade.reasoning.deep_dig import DeepDigger
     from aitrade.reasoning.floor_trader import FloorTraderReasoner
 
@@ -997,6 +1011,7 @@ def serve_cmd(
     cal_client = EconomicCalendarClient(api_key=fmp_key) if fmp_key else None
     reasoner = FloorTraderReasoner(settings=s)
     digger = DeepDigger(settings=s) if use_deep_dig else None
+    trend_hunter = None if no_trend_hunter else TrendHunter()
 
     cfg = EngineConfig(
         cycle_secs=cycle_secs or s.aitrade_engine_interval_secs,
@@ -1011,6 +1026,7 @@ def serve_cmd(
         news_per_symbol=s.aitrade_news_per_symbol,
         calendar_days_ahead=s.aitrade_calendar_days_ahead,
         use_deep_dig=use_deep_dig,
+        use_trend_hunter=not no_trend_hunter,
     )
 
     journal = TradeLogger(log_dir=s.aitrade_log_dir, strategy_id="engine")
@@ -1027,6 +1043,7 @@ def serve_cmd(
                 news_client=news_client,
                 cal_client=cal_client,
                 digger=digger,
+                trend_hunter=trend_hunter,
                 market_fetcher=market_fetcher,
                 data=data,
                 broker=broker,

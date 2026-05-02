@@ -111,11 +111,41 @@ class FloorTraderDecision(BaseModel):
     )
     stop_price: float | None = Field(
         default=None,
-        description="Hard stop (informational in v1; used as a learning signal).",
+        description=(
+            "Optional absolute stop price. Prefer ``stop_atr_mult`` so the "
+            "engine can size the stop dynamically; this field is a fallback "
+            "when an absolute level (e.g. structural support) is more right."
+        ),
     )
     target_price: float | None = Field(
         default=None,
-        description="Take-profit target (informational in v1).",
+        description=(
+            "Optional absolute take-profit price. Prefer ``target_atr_mult`` "
+            "for volatility-scaled targets; absolute is for clear structural "
+            "resistance levels."
+        ),
+    )
+    stop_atr_mult: float | None = Field(
+        default=None,
+        ge=0.5,
+        le=4.0,
+        description=(
+            "Phase 5: how many daily ATRs the stop-loss sits below entry "
+            "(long) or above entry (short). Typical 1.0-2.5; tighter for "
+            "high-conviction entries, wider for choppy names. Engine "
+            "translates into an absolute price via the symbol's daily ATR, "
+            "widened by a VIX factor in volatile regimes."
+        ),
+    )
+    target_atr_mult: float | None = Field(
+        default=None,
+        ge=1.0,
+        le=8.0,
+        description=(
+            "Phase 5: how many daily ATRs the take-profit sits favorable of "
+            "entry. Typical 2.0-4.0. Reward:risk = target_atr_mult / "
+            "stop_atr_mult; engine refuses plans with R:R < 1.5."
+        ),
     )
     reason_for_pass: str | None = Field(
         default=None,

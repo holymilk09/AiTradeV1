@@ -43,3 +43,13 @@ class BrokerClient(Protocol):
     def cancel_order(self, broker_order_id: str) -> None: ...
 
     def cancel_all(self) -> int: ...
+
+    def is_tradable(self, symbol: str) -> bool:
+        """Pre-flight check: is this symbol currently tradable on this venue?
+
+        Implementations should fail closed — when in doubt, return False.
+        Default implementation here returns True so older test stubs that
+        don't override it keep passing (they hit a paper broker that's
+        already validated upstream).
+        """
+        return True
