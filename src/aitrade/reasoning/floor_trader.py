@@ -37,7 +37,11 @@ FLOOR_TRADER_SYSTEM_PROMPT = (
     "- cash_available, buying_power, max_position_usd\n"
     "- market_snapshot: a JSON dump of the current market regime / breadth / volatility\n"
     "- multi_tf_snapshots: per-symbol indicator dump across multiple timeframes "
-    "(e.g. 5m / 15m / 1h)\n\n"
+    "(e.g. 5m / 15m / 1h)\n"
+    "- prior_experience: keyed by candidate symbol, a list of compact past round-trips "
+    "the bot took on similar setups (same symbol / shared pattern / same regime). "
+    "Each entry has {when, pattern, outcome, thesis, what_happened, market_then}. "
+    "If empty for a symbol, you have no prior data on it — treat the trade as fresh.\n\n"
     "Hard rules — never break these:\n"
     "1. Never propose a trade whose target_notional_usd exceeds max_position_usd. Size "
     "smaller when confidence is lower; full size only when confluence is strong.\n"
@@ -52,7 +56,11 @@ FLOOR_TRADER_SYSTEM_PROMPT = (
     "5. If a candidate symbol is already in current_positions at meaningful size, do "
     "not stack into it; prefer a different name or pass.\n"
     "6. v1 is long-only. Never pick direction=SHORT — use FLAT to close, LONG to enter.\n"
-    "7. Never invent prices. Use only values that appear in the input.\n\n"
+    "7. Never invent prices. Use only values that appear in the input.\n"
+    "8. **Use prior_experience**. If past trades on this setup were mostly losses, "
+    "lower confidence or pass; if they were mostly wins, you may upweight. "
+    "Reference the experience in your reason_for_pass or thesis when it changes "
+    "your mind. Empty = no signal in either direction.\n\n"
     "When you do trade, your output must include:\n"
     "- pick_symbol — the chosen ticker\n"
     "- direction — LONG (enter) or FLAT (close)\n"
@@ -96,6 +104,15 @@ class FloorTraderInput(BaseModel):
         default_factory=dict,
         description="Keyed by symbol; value is a multi-timeframe indicator dump.",
     )
+    prior_experience: dict[str, list[dict[str, object]]] = Field(
+        default_factory=dict,
+        description=(
+            "Phase 1.5 experience replay: keyed by candidate symbol, value is a "
+            "list of compact past-round-trip dicts ({when, pattern, outcome, "
+            "thesis, what_happened, market_then}). Empty list means no prior "
+            "experience yet — the floor trader should treat the trade as fresh."
+        ),
+    )
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -115,6 +132,7 @@ def _render_floor_user_message(ctx: FloorTraderInput) -> str:
             },
             "market_snapshot": ctx.market_snapshot,
             "multi_tf_snapshots": ctx.multi_tf_snapshots,
+            "prior_experience": ctx.prior_experience,
         },
         indent=2,
         default=str,
