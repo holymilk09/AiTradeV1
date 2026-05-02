@@ -479,6 +479,12 @@ def engine_paper(
         help="Add Claude+web_search sentiment overlay. Off by default — "
         "watchlist + Alpaca movers are usually enough and don't need network reliability.",
     ),
+    use_reddit_discovery: bool = typer.Option(
+        False,
+        "--use-reddit-discovery/--no-reddit-discovery",
+        help="Add Reddit/WSB social-buzz overlay (public hot.json, no auth needed). "
+        "Off by default — Reddit can rate-limit and discovery is best-effort.",
+    ),
     no_watchlist: bool = typer.Option(
         False, "--no-watchlist", help="Disable the static watchlist source."
     ),
@@ -500,6 +506,7 @@ def engine_paper(
     from aitrade.discovery.agent import DiscoveryAgent
     from aitrade.discovery.extractor import TickerExtractor, load_alpaca_active_equities
     from aitrade.discovery.movers import MoversFinder
+    from aitrade.discovery.reddit import RedditDiscoveryClient
     from aitrade.discovery.scorer import BuzzScorer
     from aitrade.execution.executor import Executor
     from aitrade.execution.risk import RiskGate
@@ -532,12 +539,30 @@ def engine_paper(
 
     movers = MoversFinder(settings=s) if not no_movers else None
 
-    discovery_agent: DiscoveryAgent | None = None
-    if use_web_discovery:
+    # Reddit + web both need the validated tradable universe; share it.
+    extractor: TickerExtractor | None = None
+    if use_web_discovery or use_reddit_discovery:
         valid = load_alpaca_active_equities(s)
         extractor = TickerExtractor(valid_tickers=valid)
-        scorer = BuzzScorer()
-        discovery_agent = DiscoveryAgent(settings=s, extractor=extractor, scorer=scorer)
+
+    discovery_agent: DiscoveryAgent | None = None
+    if use_web_discovery and extractor is not None:
+        discovery_agent = DiscoveryAgent(
+            settings=s, extractor=extractor, scorer=BuzzScorer()
+        )
+
+    reddit_client: RedditDiscoveryClient | None = None
+    if use_reddit_discovery and extractor is not None:
+        subs = tuple(
+            sub.strip().lstrip("/").removeprefix("r/")
+            for sub in s.aitrade_discovery_reddit_subs.split(",")
+            if sub.strip()
+        )
+        reddit_client = RedditDiscoveryClient(
+            extractor=extractor,
+            subs=subs or ("wallstreetbets", "stocks", "options"),
+            posts_per_sub=s.aitrade_discovery_reddit_posts_per_sub,
+        )
 
     market_fetcher = MarketSnapshotFetcher(
         data,
@@ -556,6 +581,7 @@ def engine_paper(
         duration=_parse_duration(duration),
         use_watchlist=not no_watchlist,
         use_movers=not no_movers,
+        use_reddit_discovery=use_reddit_discovery,
         use_web_discovery=use_web_discovery,
         news_lookback_hours=s.aitrade_news_lookback_hours,
         news_per_symbol=s.aitrade_news_per_symbol,
@@ -571,6 +597,8 @@ def engine_paper(
             sources.append("watchlist")
         if cfg.use_movers:
             sources.append("movers")
+        if cfg.use_reddit_discovery:
+            sources.append("reddit")
         if cfg.use_web_discovery:
             sources.append("web")
         enrichment = []
@@ -587,6 +615,7 @@ def engine_paper(
         run_engine(
             discovery=discovery_agent,
             movers=movers,
+            reddit=reddit_client,
             news_client=news_client,
             cal_client=cal_client,
             market_fetcher=market_fetcher,
@@ -856,6 +885,9 @@ def serve_cmd(
     top_n: int | None = typer.Option(None, "--top-n"),
     target_notional: float = typer.Option(2_000.0, "--notional"),
     use_web_discovery: bool = typer.Option(False, "--use-web-discovery/--no-web-discovery"),
+    use_reddit_discovery: bool = typer.Option(
+        False, "--use-reddit-discovery/--no-reddit-discovery"
+    ),
     no_watchlist: bool = typer.Option(False, "--no-watchlist"),
     no_movers: bool = typer.Option(False, "--no-movers"),
     host: str | None = typer.Option(None, "--host"),
@@ -879,6 +911,7 @@ def serve_cmd(
     from aitrade.discovery.agent import DiscoveryAgent
     from aitrade.discovery.extractor import TickerExtractor, load_alpaca_active_equities
     from aitrade.discovery.movers import MoversFinder
+    from aitrade.discovery.reddit import RedditDiscoveryClient
     from aitrade.discovery.scorer import BuzzScorer
     from aitrade.execution.executor import Executor
     from aitrade.execution.risk import RiskGate
@@ -916,12 +949,29 @@ def serve_cmd(
     exe = Executor(broker, risk)
     movers = MoversFinder(settings=s) if not no_movers else None
 
-    discovery_agent: DiscoveryAgent | None = None
-    if use_web_discovery:
+    extractor: TickerExtractor | None = None
+    if use_web_discovery or use_reddit_discovery:
         valid = load_alpaca_active_equities(s)
         extractor = TickerExtractor(valid_tickers=valid)
-        scorer = BuzzScorer()
-        discovery_agent = DiscoveryAgent(settings=s, extractor=extractor, scorer=scorer)
+
+    discovery_agent: DiscoveryAgent | None = None
+    if use_web_discovery and extractor is not None:
+        discovery_agent = DiscoveryAgent(
+            settings=s, extractor=extractor, scorer=BuzzScorer()
+        )
+
+    reddit_client: RedditDiscoveryClient | None = None
+    if use_reddit_discovery and extractor is not None:
+        subs = tuple(
+            sub.strip().lstrip("/").removeprefix("r/")
+            for sub in s.aitrade_discovery_reddit_subs.split(",")
+            if sub.strip()
+        )
+        reddit_client = RedditDiscoveryClient(
+            extractor=extractor,
+            subs=subs or ("wallstreetbets", "stocks", "options"),
+            posts_per_sub=s.aitrade_discovery_reddit_posts_per_sub,
+        )
 
     market_fetcher = MarketSnapshotFetcher(
         data,
@@ -940,6 +990,7 @@ def serve_cmd(
         duration=_parse_duration(duration),
         use_watchlist=not no_watchlist,
         use_movers=not no_movers,
+        use_reddit_discovery=use_reddit_discovery,
         use_web_discovery=use_web_discovery,
         news_lookback_hours=s.aitrade_news_lookback_hours,
         news_per_symbol=s.aitrade_news_per_symbol,
@@ -956,6 +1007,7 @@ def serve_cmd(
             run_engine(
                 discovery=discovery_agent,
                 movers=movers,
+                reddit=reddit_client,
                 news_client=news_client,
                 cal_client=cal_client,
                 market_fetcher=market_fetcher,

@@ -38,6 +38,7 @@ from aitrade.data.alpaca_data import AlpacaDataClient
 from aitrade.data.models import Bar, Timeframe
 from aitrade.discovery.agent import DiscoveryAgent
 from aitrade.discovery.movers import MoversFinder
+from aitrade.discovery.reddit import RedditDiscoveryClient
 from aitrade.discovery.scorer import DiscoveredTicker
 from aitrade.discovery.universe import build_universe
 from aitrade.execution.executor import Executor
@@ -76,9 +77,10 @@ class EngineConfig:
     target_notional_per_trade: float = 2_000.0
     max_cycles: int | None = None
     duration: timedelta | None = None
-    # Universe sources — deterministic + cheap on, web layer opt-in.
+    # Universe sources — deterministic + cheap on, social/web layers opt-in.
     use_watchlist: bool = True
     use_movers: bool = True
+    use_reddit_discovery: bool = False
     use_web_discovery: bool = False
     # Phase 2 — news + calendar enrichment for the floor-trader prompt.
     news_lookback_hours: int = 24
@@ -331,6 +333,7 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
     *,
     discovery: DiscoveryAgent | None,
     movers: MoversFinder | None,
+    reddit: RedditDiscoveryClient | None,
     news_client: AlpacaNewsClient | None,
     cal_client: EconomicCalendarClient | None,
     market_fetcher: MarketSnapshotFetcher,
@@ -349,10 +352,12 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
 
     discovered: list[DiscoveredTicker] = build_universe(
         movers=movers,
+        reddit=reddit,
         web_agent=discovery,
         web_top_n=cfg.discovery_top_n,
         use_watchlist=cfg.use_watchlist,
         use_movers=cfg.use_movers,
+        use_reddit=cfg.use_reddit_discovery,
         use_web=cfg.use_web_discovery,
     )
     # Cap to top-N so a hot day doesn't blow up the per-cycle bar fetches.
@@ -364,6 +369,7 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
             "count": len(discovered),
             "use_watchlist": cfg.use_watchlist,
             "use_movers": cfg.use_movers,
+            "use_reddit": cfg.use_reddit_discovery,
             "use_web": cfg.use_web_discovery,
             "tickers": [
                 {"symbol": d.symbol, "buzz_score": d.buzz_score} for d in discovered
@@ -580,6 +586,7 @@ def run_engine(  # noqa: PLR0913 — top-level orchestrator, intentional fan-in
     *,
     discovery: DiscoveryAgent | None,
     movers: MoversFinder | None,
+    reddit: RedditDiscoveryClient | None,
     news_client: AlpacaNewsClient | None,
     cal_client: EconomicCalendarClient | None,
     market_fetcher: MarketSnapshotFetcher,
@@ -607,6 +614,7 @@ def run_engine(  # noqa: PLR0913 — top-level orchestrator, intentional fan-in
             _run_one_cycle(
                 discovery=discovery,
                 movers=movers,
+                reddit=reddit,
                 news_client=news_client,
                 cal_client=cal_client,
                 market_fetcher=market_fetcher,

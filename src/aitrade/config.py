@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     aitrade_dashboard_host: str = Field(default="0.0.0.0")  # noqa: S104 — fly.io needs 0.0.0.0
     aitrade_dashboard_port: int = Field(default=8080, gt=0, lt=65536)
 
+    # Phase 4 — social discovery (Reddit/WSB). Opt-in; no auth needed.
+    # Comma-separated subreddits (no leading "r/"); default covers retail buzz.
+    aitrade_discovery_reddit_subs: str = Field(
+        default="wallstreetbets,stocks,options"
+    )
+    aitrade_discovery_reddit_posts_per_sub: int = Field(default=25, gt=0, le=100)
+
     @property
     def has_credentials(self) -> bool:
         return bool(

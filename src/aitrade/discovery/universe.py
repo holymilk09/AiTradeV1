@@ -1,4 +1,4 @@
-"""Universe = watchlist (always) + movers (always) + web (opt-in).
+"""Universe = watchlist (always) + movers (always) + reddit (opt-in) + web (opt-in).
 
 The engine calls :func:`build_universe` each cycle to get the merged list of
 ``DiscoveredTicker`` candidates. Sources compose by symbol — if AAPL shows
@@ -9,18 +9,21 @@ Composition order (deliberate):
 
   1. Watchlist — fixed, free, deterministic. Always there.
   2. Movers    — Alpaca screener; fast, free, deterministic.
-  3. Web       — ``DiscoveryAgent`` (Claude + web_search). Opt-in only —
+  3. Reddit    — public ``.json`` endpoint; opt-in. Adds retail-trader buzz
+                 (r/wallstreetbets, r/stocks, r/options).
+  4. Web       — ``DiscoveryAgent`` (Claude + web_search). Opt-in only —
                  noisy, slow, rate-limit-prone, can drop on flaky networks.
 
-If web is enabled and fails (typical: VPN-killed stream), the engine still
-runs from watchlist + movers. The bot never fails just because Twitter is
-having a bad day.
+If reddit or web is enabled and fails (typical: rate limit, VPN-killed stream),
+the engine still runs from watchlist + movers. The bot never fails just
+because Reddit or Twitter is having a bad day.
 """
 
 from __future__ import annotations
 
 from aitrade.discovery.agent import DiscoveryAgent
 from aitrade.discovery.movers import MoversFinder
+from aitrade.discovery.reddit import RedditDiscoveryClient
 from aitrade.discovery.scorer import DiscoveredTicker
 from aitrade.discovery.watchlist import watchlist_as_discovered
 
@@ -72,17 +75,19 @@ def merge_sources(*sources: list[DiscoveredTicker]) -> list[DiscoveredTicker]:
 def build_universe(
     *,
     movers: MoversFinder | None = None,
+    reddit: RedditDiscoveryClient | None = None,
     web_agent: DiscoveryAgent | None = None,
     web_top_n: int = 20,
     use_watchlist: bool = True,
     use_movers: bool = True,
+    use_reddit: bool = False,
     use_web: bool = False,
 ) -> list[DiscoveredTicker]:
     """Compose the cycle's universe from the configured sources.
 
-    Defaults: watchlist + movers ON, web OFF. The web layer is opt-in
-    because it's slow, expensive, and prone to network drops; turn it on
-    once you have a stable network path to ``api.anthropic.com``.
+    Defaults: watchlist + movers ON, reddit + web OFF. The social/web layers
+    are opt-in because they're network-dependent and can rate-limit; turn
+    them on once you have a stable path and the right credentials.
     """
     sources: list[list[DiscoveredTicker]] = []
 
@@ -91,6 +96,9 @@ def build_universe(
 
     if use_movers and movers is not None:
         sources.append(movers.find())
+
+    if use_reddit and reddit is not None:
+        sources.append(reddit.discover())
 
     if use_web and web_agent is not None:
         sources.append(web_agent.discover(top_n=web_top_n))
