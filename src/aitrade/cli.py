@@ -495,6 +495,7 @@ def engine_paper(
     """
     from aitrade.bots.engine_runner import EngineConfig, run_engine
     from aitrade.brokers.alpaca import build_client
+    from aitrade.calendar.client import EconomicCalendarClient
     from aitrade.data.alpaca_data import AlpacaDataClient
     from aitrade.discovery.agent import DiscoveryAgent
     from aitrade.discovery.extractor import TickerExtractor, load_alpaca_active_equities
@@ -507,6 +508,7 @@ def engine_paper(
     from aitrade.journal.similarity import SimilarTradesFinder
     from aitrade.logging.trade_logger import TradeLogger
     from aitrade.market.snapshot import MarketSnapshotFetcher
+    from aitrade.news.client import AlpacaNewsClient
     from aitrade.reasoning.floor_trader import FloorTraderReasoner
 
     s = get_settings()
@@ -542,6 +544,9 @@ def engine_paper(
         ttl_secs=s.aitrade_market_snapshot_ttl_secs,
         max_stale_secs=s.aitrade_market_snapshot_max_stale_secs,
     )
+    news_client = AlpacaNewsClient(settings=s)
+    fmp_key = s.fmp_api_key.get_secret_value() or None
+    cal_client = EconomicCalendarClient(api_key=fmp_key) if fmp_key else None
     reasoner = FloorTraderReasoner(settings=s)
 
     cfg = EngineConfig(
@@ -552,6 +557,9 @@ def engine_paper(
         use_watchlist=not no_watchlist,
         use_movers=not no_movers,
         use_web_discovery=use_web_discovery,
+        news_lookback_hours=s.aitrade_news_lookback_hours,
+        news_per_symbol=s.aitrade_news_per_symbol,
+        calendar_days_ahead=s.aitrade_calendar_days_ahead,
     )
 
     with TradeLogger(log_dir=s.aitrade_log_dir, strategy_id="engine") as journal:
@@ -565,14 +573,22 @@ def engine_paper(
             sources.append("movers")
         if cfg.use_web_discovery:
             sources.append("web")
+        enrichment = []
+        if news_client is not None:
+            enrichment.append("news")
+        if cal_client is not None:
+            enrichment.append("calendar")
         console.print(
             f"[cyan]Engine starting[/cyan]: cycle={cfg.cycle_secs}s "
             f"top_n={cfg.discovery_top_n} notional=${cfg.target_notional_per_trade:.0f} "
-            f"duration={cfg.duration} sources=[{', '.join(sources)}]"
+            f"duration={cfg.duration} sources=[{', '.join(sources)}] "
+            f"enrichment=[{', '.join(enrichment) or 'none'}]"
         )
         run_engine(
             discovery=discovery_agent,
             movers=movers,
+            news_client=news_client,
+            cal_client=cal_client,
             market_fetcher=market_fetcher,
             data=data,
             broker=broker,
@@ -692,6 +708,103 @@ def journal_cmd(
         f"[bold]Hit rate:[/bold] "
         f"{wins / max(1, wins + losses):.1%}"
     )
+
+
+@app.command("brief")
+def brief_cmd(
+    symbol: str | None = typer.Option(
+        None, "--symbol", "-s",
+        help="If set, also pull recent news for this ticker.",
+    ),
+    days_ahead: int = typer.Option(
+        7, "--days-ahead", "-d",
+        help="Show macro + earnings events for the next N days.",
+    ),
+    news_lookback: int = typer.Option(
+        24, "--news-hours", help="How many hours of news to scan."
+    ),
+) -> None:
+    """Pre-market brief: upcoming macro events + earnings + (optional) symbol news.
+
+    Calendar requires FMP_API_KEY in .env (free tier). News requires only
+    Alpaca creds. Both fail gracefully — sections are skipped if their
+    source is unavailable.
+    """
+    from aitrade.calendar.client import EconomicCalendarClient
+    from aitrade.news.client import AlpacaNewsClient
+
+    s = get_settings()
+    configure_logging(s.aitrade_log_dir, s.aitrade_log_level)
+
+    # Macro calendar
+    fmp_key = s.fmp_api_key.get_secret_value() or None
+    if fmp_key is None:
+        console.print(
+            "[yellow]No FMP_API_KEY in .env — macro/earnings calendar skipped.[/yellow]"
+        )
+    else:
+        cal = EconomicCalendarClient(api_key=fmp_key)
+        econ = cal.economic_events(days_ahead=days_ahead)
+        if econ:
+            t = Table(title=f"US economic calendar — next {days_ahead}d")
+            for col in ["date", "event", "prev", "est", "actual", "impact"]:
+                t.add_column(col)
+            for econ_event in econ[:30]:
+                d = econ_event.to_compact()
+                t.add_row(
+                    str(d.get("date") or "-"),
+                    str(d.get("event") or "-"),
+                    str(d.get("prev") if d.get("prev") is not None else "-"),
+                    str(d.get("est") if d.get("est") is not None else "-"),
+                    str(d.get("actual") if d.get("actual") is not None else "-"),
+                    str(d.get("impact") or "-"),
+                )
+            console.print(t)
+        else:
+            console.print("[dim]No upcoming macro events from FMP.[/dim]")
+
+        symbols_filter = [symbol.upper()] if symbol else None
+        earn = cal.earnings_events(days_ahead=days_ahead, symbols=symbols_filter)
+        if earn:
+            t = Table(title=f"Upcoming earnings — next {days_ahead}d")
+            for col in ["date", "symbol", "time", "eps_est", "eps_actual"]:
+                t.add_column(col)
+            for earn_event in earn[:50]:
+                d = earn_event.to_compact()
+                t.add_row(
+                    str(d.get("date") or "-"),
+                    str(d.get("symbol") or "-"),
+                    str(d.get("time") or "-"),
+                    str(d.get("eps_estimated") if d.get("eps_estimated") is not None else "-"),
+                    str(d.get("eps_actual") if d.get("eps_actual") is not None else "-"),
+                )
+            console.print(t)
+
+    # Per-symbol news (only if --symbol given; the API only fetches for symbols)
+    if symbol is not None:
+        if not s.has_credentials:
+            console.print(
+                "[yellow]Alpaca credentials missing — news skipped.[/yellow]"
+            )
+        else:
+            news = AlpacaNewsClient(settings=s)
+            items = news.fetch(
+                [symbol.upper()],
+                lookback_hours=news_lookback,
+                limit_per_symbol=10,
+            ).get(symbol.upper(), [])
+            if not items:
+                console.print(
+                    f"[dim]No recent news for {symbol.upper()} in the last "
+                    f"{news_lookback}h.[/dim]"
+                )
+            else:
+                t = Table(title=f"Recent news — {symbol.upper()}")
+                for col in ["age", "source", "headline"]:
+                    t.add_column(col)
+                for it in items:
+                    t.add_row(f"{it.age_minutes:.0f}m", it.source, it.headline[:100])
+                console.print(t)
 
 
 if __name__ == "__main__":

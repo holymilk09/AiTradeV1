@@ -27,12 +27,13 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
 from aitrade.backtest.alpaca_adapter import df_to_bars
 from aitrade.brokers.base import BrokerClient
+from aitrade.calendar.client import EconomicCalendarClient
 from aitrade.data.alpaca_data import AlpacaDataClient
 from aitrade.data.models import Bar, Timeframe
 from aitrade.discovery.agent import DiscoveryAgent
@@ -47,6 +48,7 @@ from aitrade.journal.similarity import SimilarityQuery, SimilarTradesFinder
 from aitrade.logging.trade_logger import EventType, TradeLogger
 from aitrade.market.freshness import StaleDataError, assert_bars_fresh
 from aitrade.market.snapshot import MarketSnapshotFetcher
+from aitrade.news.client import AlpacaNewsClient
 from aitrade.patterns.base import PatternSignal
 from aitrade.patterns.board import CandidateBoard, build_board
 from aitrade.patterns.registry import get_all_detectors
@@ -78,6 +80,10 @@ class EngineConfig:
     use_watchlist: bool = True
     use_movers: bool = True
     use_web_discovery: bool = False
+    # Phase 2 — news + calendar enrichment for the floor-trader prompt.
+    news_lookback_hours: int = 24
+    news_per_symbol: int = 3
+    calendar_days_ahead: int = 7
 
 
 def _bars_lookback_window(tf: Timeframe, count: int) -> tuple[datetime, datetime]:
@@ -183,7 +189,69 @@ def _build_prior_experience(
     return out
 
 
-def _build_floor_trader_input(
+def _build_news_dump(
+    board: CandidateBoard,
+    news_client: AlpacaNewsClient | None,
+    *,
+    consider_top_k: int = 5,
+    lookback_hours: int = 24,
+    per_symbol: int = 3,
+) -> dict[str, list[dict[str, object]]]:
+    """For the top-K board candidates, fetch recent headlines and project them
+    through ``NewsItem.to_compact``. Empty dict if news_client is None or the
+    fetch returns nothing — a benign signal to the floor-trader.
+    """
+    if news_client is None:
+        return {}
+    symbols = [c.symbol for c in board.top(consider_top_k)]
+    if not symbols:
+        return {}
+    try:
+        raw = news_client.fetch(
+            symbols, lookback_hours=lookback_hours, limit_per_symbol=per_symbol
+        )
+    except Exception as e:  # pragma: no cover — client already swallows
+        logger.warning("news fetch failed: {}", e)
+        return {}
+    return {
+        sym: [cast("dict[str, object]", item.to_compact()) for item in items]
+        for sym, items in raw.items()
+    }
+
+
+def _build_calendar_dump(
+    cal_client: EconomicCalendarClient | None,
+    candidate_symbols: list[str],
+    *,
+    days_ahead: int = 7,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Return (economic_calendar, upcoming_earnings) projections for the prompt.
+    Returns ([], []) if cal_client is None or fetches fail."""
+    if cal_client is None:
+        return [], []
+    econ: list[dict[str, object]] = []
+    earn: list[dict[str, object]] = []
+    try:
+        econ = [
+            cast("dict[str, object]", e.to_compact())
+            for e in cal_client.economic_events(days_ahead=days_ahead)
+        ]
+    except Exception as e:  # pragma: no cover — client already swallows
+        logger.warning("economic calendar fetch failed: {}", e)
+    try:
+        earn = [
+            cast("dict[str, object]", e.to_compact())
+            for e in cal_client.earnings_events(
+                days_ahead=days_ahead,
+                symbols=candidate_symbols or None,
+            )
+        ]
+    except Exception as e:  # pragma: no cover — client already swallows
+        logger.warning("earnings calendar fetch failed: {}", e)
+    return econ, earn
+
+
+def _build_floor_trader_input(  # noqa: PLR0913 — explicit context fan-in
     board: CandidateBoard,
     *,
     positions: dict[str, dict[str, Any]],
@@ -193,6 +261,9 @@ def _build_floor_trader_input(
     market_snapshot_dump: dict[str, Any],
     multi_tf_dumps: dict[str, dict[str, Any]],
     prior_experience: dict[str, list[dict[str, Any]]] | None = None,
+    news_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
+    economic_calendar: list[dict[str, Any]] | None = None,
+    upcoming_earnings: list[dict[str, Any]] | None = None,
 ) -> FloorTraderInput:
     return FloorTraderInput(
         candidate_board=[c.to_dict() for c in board.top(10)],
@@ -203,6 +274,9 @@ def _build_floor_trader_input(
         market_snapshot=market_snapshot_dump,
         multi_tf_snapshots=multi_tf_dumps,
         prior_experience=prior_experience or {},
+        news_by_symbol=news_by_symbol or {},
+        economic_calendar=economic_calendar or [],
+        upcoming_earnings=upcoming_earnings or [],
     )
 
 
@@ -257,6 +331,8 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
     *,
     discovery: DiscoveryAgent | None,
     movers: MoversFinder | None,
+    news_client: AlpacaNewsClient | None,
+    cal_client: EconomicCalendarClient | None,
     market_fetcher: MarketSnapshotFetcher,
     data: AlpacaDataClient,
     broker: BrokerClient,
@@ -406,6 +482,16 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
     prior_experience = _build_prior_experience(
         board, snapshot.regime.value, similar_finder
     )
+    news_dump = _build_news_dump(
+        board,
+        news_client,
+        lookback_hours=cfg.news_lookback_hours,
+        per_symbol=cfg.news_per_symbol,
+    )
+    candidate_symbols = [c.symbol for c in board.top(10)]
+    econ_events, earn_events = _build_calendar_dump(
+        cal_client, candidate_symbols, days_ahead=cfg.calendar_days_ahead
+    )
     decision = reasoner.decide_board(
         _build_floor_trader_input(
             board,
@@ -416,6 +502,9 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
             market_snapshot_dump=snapshot_dump,
             multi_tf_dumps=multi_tf_dumps,
             prior_experience=prior_experience,
+            news_by_symbol=news_dump,
+            economic_calendar=econ_events,
+            upcoming_earnings=earn_events,
         )
     )
     if decision is None:
@@ -491,6 +580,8 @@ def run_engine(  # noqa: PLR0913 — top-level orchestrator, intentional fan-in
     *,
     discovery: DiscoveryAgent | None,
     movers: MoversFinder | None,
+    news_client: AlpacaNewsClient | None,
+    cal_client: EconomicCalendarClient | None,
     market_fetcher: MarketSnapshotFetcher,
     data: AlpacaDataClient,
     broker: BrokerClient,
@@ -516,6 +607,8 @@ def run_engine(  # noqa: PLR0913 — top-level orchestrator, intentional fan-in
             _run_one_cycle(
                 discovery=discovery,
                 movers=movers,
+                news_client=news_client,
+                cal_client=cal_client,
                 market_fetcher=market_fetcher,
                 data=data,
                 broker=broker,
