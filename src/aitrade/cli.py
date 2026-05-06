@@ -511,6 +511,7 @@ def engine_paper(
     one (or passes) → risk gate → Alpaca paper. Every event lands in
     the trade journal; round-trips are reconciled after each cycle.
     """
+    from aitrade.alerts import build_notifier
     from aitrade.bots.engine_runner import EngineConfig, run_engine
     from aitrade.brokers.alpaca import build_client
     from aitrade.calendar.client import EconomicCalendarClient
@@ -589,6 +590,9 @@ def engine_paper(
     reasoner = FloorTraderReasoner(settings=s)
     digger = DeepDigger(settings=s) if use_deep_dig else None
     trend_hunter = None if no_trend_hunter else TrendHunter()
+    notifier = build_notifier(
+        s.aitrade_alert_webhook_url, s.aitrade_alert_min_level
+    )
 
     cfg = EngineConfig(
         cycle_secs=cycle_secs or s.aitrade_engine_interval_secs,
@@ -604,6 +608,8 @@ def engine_paper(
         calendar_days_ahead=s.aitrade_calendar_days_ahead,
         use_deep_dig=use_deep_dig,
         use_trend_hunter=not no_trend_hunter,
+        skip_open_mins=s.aitrade_skip_open_mins,
+        skip_close_mins=s.aitrade_skip_close_mins,
     )
 
     with TradeLogger(log_dir=s.aitrade_log_dir, strategy_id="engine") as journal:
@@ -649,6 +655,7 @@ def engine_paper(
             reasoner=reasoner,
             similar_finder=similar_finder,
             narrative_gen=narrative_gen,
+            notifier=notifier,
             journal=journal,
             reconciler=reconciler,
             cfg=cfg,
@@ -761,6 +768,112 @@ def journal_cmd(
         f"[bold]Hit rate:[/bold] "
         f"{wins / max(1, wins + losses):.1%}"
     )
+
+
+@app.command("stats")
+def stats_cmd(
+    by_hour: bool = typer.Option(
+        False, "--by-hour", help="Show win-rate breakdown by entry-hour (UTC)"
+    ),
+    by_regime: bool = typer.Option(
+        False, "--by-regime", help="Show win-rate breakdown by market regime at entry"
+    ),
+    by_pattern: bool = typer.Option(
+        False, "--by-pattern", help="Show per-pattern win-rate + P&L"
+    ),
+) -> None:
+    """Phase 6 — performance roll-up across the journal.
+
+    Without flags: top-line stats (n trades, win rate, expectancy, Sharpe,
+    max drawdown). Add ``--by-hour`` / ``--by-regime`` / ``--by-pattern``
+    to drill into where the edge is (or isn't).
+    """
+    from aitrade.journal.round_trips import RoundTripReconciler
+    from aitrade.journal.views import JournalViews
+    from aitrade.logging.trade_logger import TradeLogger
+
+    s = get_settings()
+    configure_logging(s.aitrade_log_dir, s.aitrade_log_level)
+    journal = TradeLogger(log_dir=s.aitrade_log_dir)
+    RoundTripReconciler(journal).reconcile()
+    views = JournalViews(journal)
+
+    summary = views.summary_stats()
+    if summary.n_trades == 0:
+        console.print("[yellow]No round-trips yet — run the engine first.[/yellow]")
+        return
+
+    summary_table = Table(title="Performance summary")
+    summary_table.add_column("metric")
+    summary_table.add_column("value", justify="right")
+    summary_table.add_row("trades", str(summary.n_trades))
+    summary_table.add_row(
+        "wins / losses / breakeven",
+        f"{summary.n_wins} / {summary.n_losses} / {summary.n_breakeven}",
+    )
+    summary_table.add_row("win rate", f"{summary.win_rate:.1%}")
+    summary_table.add_row("total P&L", f"${summary.total_pnl_usd:+,.2f}")
+    summary_table.add_row("avg win", f"${summary.avg_win_usd:+,.2f}")
+    summary_table.add_row("avg loss", f"${summary.avg_loss_usd:+,.2f}")
+    summary_table.add_row("expectancy / trade", f"${summary.expectancy_usd:+,.2f}")
+    summary_table.add_row(
+        "Sharpe (annualized)",
+        f"{summary.sharpe_annualized:.2f}" if summary.sharpe_annualized else "n/a",
+    )
+    summary_table.add_row("max drawdown", f"${summary.max_drawdown_usd:,.2f}")
+    summary_table.add_row(
+        "avg holding period", _humanize_secs(summary.avg_holding_secs)
+    )
+    console.print(summary_table)
+
+    if by_pattern:
+        rows = views.pattern_stats()
+        if rows:
+            t = Table(title="Per-pattern breakdown")
+            for col in ["pattern", "n", "W", "L", "BE", "win_rate",
+                        "avg_pnl_pct", "total_pnl_usd"]:
+                t.add_column(col)
+            for r in rows:
+                t.add_row(
+                    r.pattern, str(r.n_trades), str(r.n_wins), str(r.n_losses),
+                    str(r.n_breakeven), f"{r.win_rate:.1%}",
+                    f"{r.avg_pnl_pct * 100:+.2f}%",
+                    f"${r.total_pnl_usd:+,.2f}",
+                )
+            console.print(t)
+
+    if by_hour:
+        rows_h = views.win_rate_by_hour()
+        if rows_h:
+            t = Table(title="Win-rate by entry-hour (UTC)")
+            for col in ["hour", "n", "wins", "win_rate"]:
+                t.add_column(col)
+            for hour, n, wins, wr in rows_h:
+                t.add_row(f"{hour:02d}:00", str(n), str(wins), f"{wr:.1%}")
+            console.print(t)
+
+    if by_regime:
+        rows_r = views.win_rate_by_regime()
+        if rows_r:
+            t = Table(title="Win-rate by market regime at entry")
+            for col in ["regime", "n", "wins", "win_rate"]:
+                t.add_column(col)
+            for regime, n, wins, wr in rows_r:
+                t.add_row(regime, str(n), str(wins), f"{wr:.1%}")
+            console.print(t)
+
+
+def _humanize_secs(secs: float) -> str:
+    """Stat-table-friendly holding period formatter."""
+    if secs <= 0:
+        return "—"
+    if secs < 60:
+        return f"{int(secs)}s"
+    if secs < 3600:
+        return f"{secs / 60:.1f}m"
+    if secs < 86_400:
+        return f"{secs / 3600:.1f}h"
+    return f"{secs / 86_400:.1f}d"
 
 
 @app.command("brief")
@@ -929,6 +1042,7 @@ def serve_cmd(
 
     import uvicorn
 
+    from aitrade.alerts import build_notifier
     from aitrade.bots.engine_runner import EngineConfig, run_engine
     from aitrade.brokers.alpaca import build_client
     from aitrade.calendar.client import EconomicCalendarClient
@@ -1012,6 +1126,9 @@ def serve_cmd(
     reasoner = FloorTraderReasoner(settings=s)
     digger = DeepDigger(settings=s) if use_deep_dig else None
     trend_hunter = None if no_trend_hunter else TrendHunter()
+    notifier = build_notifier(
+        s.aitrade_alert_webhook_url, s.aitrade_alert_min_level
+    )
 
     cfg = EngineConfig(
         cycle_secs=cycle_secs or s.aitrade_engine_interval_secs,
@@ -1027,6 +1144,8 @@ def serve_cmd(
         calendar_days_ahead=s.aitrade_calendar_days_ahead,
         use_deep_dig=use_deep_dig,
         use_trend_hunter=not no_trend_hunter,
+        skip_open_mins=s.aitrade_skip_open_mins,
+        skip_close_mins=s.aitrade_skip_close_mins,
     )
 
     journal = TradeLogger(log_dir=s.aitrade_log_dir, strategy_id="engine")
@@ -1051,6 +1170,7 @@ def serve_cmd(
                 reasoner=reasoner,
                 similar_finder=similar_finder,
                 narrative_gen=narrative_gen,
+                notifier=notifier,
                 journal=journal,
                 reconciler=reconciler,
                 cfg=cfg,

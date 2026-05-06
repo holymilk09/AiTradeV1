@@ -16,6 +16,7 @@ from aitrade.market.snapshot import (
     MarketSnapshot,
     MarketSnapshotFetcher,
     _detect_session,
+    is_in_volatile_open_close,
 )
 
 # --------------------------------------------------------------------------- #
@@ -269,3 +270,63 @@ def test_age_secs_uses_provided_clock() -> None:
     )
     later = datetime(2026, 4, 24, 12, 1, tzinfo=UTC)
     assert snap.age_secs(later) == 60.0
+
+
+# --------------------------------------------------------------------------- #
+# Phase 6 — time-of-day gating                                                #
+# --------------------------------------------------------------------------- #
+
+
+def _ny_aware(*ymdhms: int) -> datetime:
+    """Build a NY-time-aware datetime from (Y, M, D, H, M[, S])."""
+    from zoneinfo import ZoneInfo
+
+    return datetime(*ymdhms, tzinfo=ZoneInfo("America/New_York"))  # type: ignore[arg-type]
+
+
+def test_open_window_gates_first_5_minutes() -> None:
+    """9:30 → 9:35 ET on a weekday is gated by default."""
+    assert is_in_volatile_open_close(_ny_aware(2026, 4, 21, 9, 30)) is True
+    assert is_in_volatile_open_close(_ny_aware(2026, 4, 21, 9, 34, 59)) is True
+    assert is_in_volatile_open_close(_ny_aware(2026, 4, 21, 9, 35)) is False  # boundary
+
+
+def test_close_window_gates_last_5_minutes() -> None:
+    assert is_in_volatile_open_close(_ny_aware(2026, 4, 21, 15, 55)) is True
+    assert is_in_volatile_open_close(_ny_aware(2026, 4, 21, 15, 59, 59)) is True
+    # 16:00 sharp is the close itself — outside the *open* regular session,
+    # so the function returns False (the engine doesn't trade then anyway).
+    assert is_in_volatile_open_close(_ny_aware(2026, 4, 21, 15, 54, 59)) is False
+
+
+def test_midday_is_not_gated() -> None:
+    assert is_in_volatile_open_close(_ny_aware(2026, 4, 21, 12, 0)) is False
+
+
+def test_zero_skip_disables_gating() -> None:
+    assert is_in_volatile_open_close(
+        _ny_aware(2026, 4, 21, 9, 32),
+        skip_open_mins=0, skip_close_mins=0,
+    ) is False
+
+
+def test_weekend_never_gated() -> None:
+    # Saturday at what would be the open — no regular session exists.
+    assert is_in_volatile_open_close(_ny_aware(2026, 4, 25, 9, 32)) is False
+
+
+def test_custom_skip_window_extends_gate() -> None:
+    """skip_open_mins=15 widens the gate to 9:30 → 9:45."""
+    assert is_in_volatile_open_close(
+        _ny_aware(2026, 4, 21, 9, 44),
+        skip_open_mins=15,
+    ) is True
+    assert is_in_volatile_open_close(
+        _ny_aware(2026, 4, 21, 9, 46),
+        skip_open_mins=15,
+    ) is False
+
+
+def test_premarket_not_gated() -> None:
+    """The gate only applies *inside* regular session, not premarket."""
+    assert is_in_volatile_open_close(_ny_aware(2026, 4, 21, 8, 0)) is False

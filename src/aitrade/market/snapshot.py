@@ -111,6 +111,37 @@ def _detect_session(at: datetime) -> str:
     return "closed"
 
 
+def is_in_volatile_open_close(
+    at: datetime,
+    *,
+    skip_open_mins: int = 5,
+    skip_close_mins: int = 5,
+) -> bool:
+    """Phase 6: True when the instant lands in the regular session's first
+    ``skip_open_mins`` minutes (9:30 ET → 9:30+N) or the last ``skip_close_mins``
+    (16:00−N → 16:00 ET).
+
+    Returns False outside regular session, on weekends, or when both knobs
+    are 0. Used by the engine to skip cycles in chronically noisy windows
+    that historically just generate stop-outs.
+    """
+    if skip_open_mins <= 0 and skip_close_mins <= 0:
+        return False
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=UTC)
+    ny = at.astimezone(_NY)
+    if ny.weekday() >= 5:
+        return False
+    t = ny.time()
+    open_end = time(9, 30 + skip_open_mins) if skip_open_mins > 0 else time(9, 30)
+    close_start = (
+        time(15, 60 - skip_close_mins) if skip_close_mins > 0 else time(16, 0)
+    )
+    if skip_open_mins > 0 and time(9, 30) <= t < open_end:
+        return True
+    return skip_close_mins > 0 and close_start <= t < time(16, 0)
+
+
 @dataclass(slots=True)
 class MarketSnapshotFetcher:
     """TTL-cached fetcher for the broad-market snapshot.

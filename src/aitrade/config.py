@@ -66,6 +66,16 @@ class Settings(BaseSettings):
     )
     aitrade_discovery_reddit_posts_per_sub: int = Field(default=25, gt=0, le=100)
 
+    # Phase 6 — operational hardening: webhook alerts + time-of-day gating.
+    # Generic incoming-webhook URL (Slack/Discord/ntfy compatible). Empty
+    # disables alerts (notifier is a no-op).
+    aitrade_alert_webhook_url: str = Field(default="")
+    aitrade_alert_min_level: str = Field(default="info")  # info | warn | error
+    # Skip the first/last N minutes of regular session — chronically noisy
+    # tape that fills the journal with stop-outs. 0 = no gating.
+    aitrade_skip_open_mins: int = Field(default=5, ge=0, lt=60)
+    aitrade_skip_close_mins: int = Field(default=5, ge=0, lt=60)
+
     @property
     def has_credentials(self) -> bool:
         return bool(

@@ -54,6 +54,35 @@ class PatternStats:
         return self.n_wins / self.n_trades
 
 
+@dataclass(frozen=True, slots=True)
+class SummaryStats:
+    """Phase 6 — top-level performance roll-up over all round-trips.
+
+    Sharpe is the daily-return Sharpe (assumes 252 trading days, zero
+    risk-free rate). Max drawdown is computed on the cumulative P&L
+    series, returned in **dollars** (not pct of starting equity, since we
+    don't track equity at trip-time). Expectancy is per-trade in USD.
+    """
+
+    n_trades: int
+    n_wins: int
+    n_losses: int
+    n_breakeven: int
+    total_pnl_usd: float
+    avg_win_usd: float
+    avg_loss_usd: float
+    expectancy_usd: float
+    sharpe_annualized: float
+    max_drawdown_usd: float
+    avg_holding_secs: float
+
+    @property
+    def win_rate(self) -> float:
+        if self.n_trades == 0:
+            return 0.0
+        return self.n_wins / self.n_trades
+
+
 # --- main view layer ---------------------------------------------------------
 
 
@@ -183,6 +212,171 @@ class JournalViews:
             )
         # Deterministic ordering: most-traded first, alphabetical tiebreak.
         out.sort(key=lambda s: (-s.n_trades, s.pattern))
+        return out
+
+    # ----- summary aggregates (Phase 6) ------------------------------------
+
+    def summary_stats(self) -> SummaryStats:
+        """Top-level roll-up across every round-trip in the journal.
+
+        Returns a zero-trade summary when the table is empty rather than
+        raising — operationally useful (the CLI prints "no trades yet"
+        instead of crashing on a fresh deploy).
+        """
+        cur = self._conn.execute(
+            "SELECT exit_ts, pnl_usd, pnl_bucket, holding_secs "
+            "FROM round_trips ORDER BY exit_ts ASC"
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return SummaryStats(
+                n_trades=0, n_wins=0, n_losses=0, n_breakeven=0,
+                total_pnl_usd=0.0, avg_win_usd=0.0, avg_loss_usd=0.0,
+                expectancy_usd=0.0, sharpe_annualized=0.0,
+                max_drawdown_usd=0.0, avg_holding_secs=0.0,
+            )
+
+        n_wins = n_losses = n_breakeven = 0
+        wins_sum = 0.0
+        losses_sum = 0.0
+        total_pnl = 0.0
+        total_holding = 0.0
+
+        # Daily P&L for Sharpe — group by exit-day.
+        daily_pnl: dict[str, float] = defaultdict(float)
+        # Cumulative-pnl series for max drawdown — append in exit-time order.
+        cum_series: list[float] = []
+        running = 0.0
+
+        for row in rows:
+            exit_ts_str = str(row[0])
+            try:
+                pnl = float(row[1])
+            except (TypeError, ValueError):
+                pnl = 0.0
+            bucket = str(row[2])
+            try:
+                holding = int(row[3])
+            except (TypeError, ValueError):
+                holding = 0
+
+            total_pnl += pnl
+            total_holding += holding
+            running += pnl
+            cum_series.append(running)
+
+            try:
+                day = _parse_ts(exit_ts_str).date().isoformat()
+            except (TypeError, ValueError):
+                day = exit_ts_str[:10]
+            daily_pnl[day] += pnl
+
+            if bucket == PnlBucket.WIN.value:
+                n_wins += 1
+                wins_sum += pnl
+            elif bucket == PnlBucket.LOSS.value:
+                n_losses += 1
+                losses_sum += pnl
+            else:
+                n_breakeven += 1
+
+        n = len(rows)
+        avg_win = wins_sum / n_wins if n_wins else 0.0
+        avg_loss = losses_sum / n_losses if n_losses else 0.0
+        expectancy = total_pnl / n if n else 0.0
+        avg_holding = total_holding / n if n else 0.0
+
+        # Sharpe on daily returns. With <2 days we don't have enough variance
+        # to compute meaningfully — return 0.0 rather than divide by zero.
+        sharpe = 0.0
+        if len(daily_pnl) >= 2:
+            returns = list(daily_pnl.values())
+            mean_r = sum(returns) / len(returns)
+            var_r = sum((r - mean_r) ** 2 for r in returns) / len(returns)
+            stdev = var_r**0.5
+            if stdev > 0:
+                # Annualize assuming 252 trading days.
+                sharpe = (mean_r / stdev) * (252**0.5)
+
+        # Max drawdown — largest peak-to-trough drop in cumulative P&L.
+        max_dd = 0.0
+        peak = cum_series[0]
+        for v in cum_series:
+            peak = max(peak, v)
+            dd = peak - v
+            max_dd = max(max_dd, dd)
+
+        return SummaryStats(
+            n_trades=n,
+            n_wins=n_wins,
+            n_losses=n_losses,
+            n_breakeven=n_breakeven,
+            total_pnl_usd=total_pnl,
+            avg_win_usd=avg_win,
+            avg_loss_usd=avg_loss,
+            expectancy_usd=expectancy,
+            sharpe_annualized=sharpe,
+            max_drawdown_usd=max_dd,
+            avg_holding_secs=avg_holding,
+        )
+
+    def win_rate_by_hour(self) -> list[tuple[int, int, int, float]]:
+        """Win-rate breakdown by entry-hour (UTC, 0-23).
+
+        Returns rows of ``(hour, n_trades, n_wins, win_rate)`` sorted by
+        hour. Useful for spotting "the bot can't trade between 9:30 and
+        10:00" patterns once enough round-trips accumulate.
+        """
+        cur = self._conn.execute(
+            "SELECT entry_ts, pnl_bucket FROM round_trips"
+        )
+        per_hour_total: dict[int, int] = defaultdict(int)
+        per_hour_wins: dict[int, int] = defaultdict(int)
+        for row in cur.fetchall():
+            try:
+                ts = _parse_ts(str(row[0]))
+            except (TypeError, ValueError):
+                continue
+            hour = ts.hour
+            per_hour_total[hour] += 1
+            if str(row[1]) == PnlBucket.WIN.value:
+                per_hour_wins[hour] += 1
+        out: list[tuple[int, int, int, float]] = []
+        for hour in sorted(per_hour_total):
+            total = per_hour_total[hour]
+            wins = per_hour_wins[hour]
+            wr = wins / total if total else 0.0
+            out.append((hour, total, wins, wr))
+        return out
+
+    def win_rate_by_regime(self) -> list[tuple[str, int, int, float]]:
+        """Win-rate breakdown by market regime at entry.
+
+        Returns rows of ``(regime, n_trades, n_wins, win_rate)``. Regime
+        is read from the ``market_snapshot`` JSON column on each row;
+        rows without a regime tag are bucketed under "unknown".
+        """
+        cur = self._conn.execute(
+            "SELECT market_snapshot, pnl_bucket FROM round_trips"
+        )
+        per_total: dict[str, int] = defaultdict(int)
+        per_wins: dict[str, int] = defaultdict(int)
+        for row in cur.fetchall():
+            snapshot = _safe_market_snapshot(row[0])
+            regime = "unknown"
+            if isinstance(snapshot, dict):
+                raw = snapshot.get("regime")
+                if isinstance(raw, str) and raw:
+                    regime = raw
+            per_total[regime] += 1
+            if str(row[1]) == PnlBucket.WIN.value:
+                per_wins[regime] += 1
+        out: list[tuple[str, int, int, float]] = []
+        for regime in sorted(per_total):
+            total = per_total[regime]
+            wins = per_wins[regime]
+            wr = wins / total if total else 0.0
+            out.append((regime, total, wins, wr))
         return out
 
     # ----- LLM digest -------------------------------------------------------

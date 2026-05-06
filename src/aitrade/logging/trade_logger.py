@@ -34,6 +34,7 @@ class EventType(str, Enum):
     FLOOR_TRADER_DECISION = "floor_trader_decision"
     DEEP_DIG = "deep_dig"
     STOP_PLAN = "stop_plan"
+    TIME_GATED_SKIP = "time_gated_skip"
     ROUND_TRIP_CLOSED = "round_trip_closed"
     STALE_DATA_SKIP = "stale_data_skip"
     EMPTY_DISCOVERY = "empty_discovery"

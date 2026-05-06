@@ -31,6 +31,7 @@ from typing import Any, cast
 
 from loguru import logger
 
+from aitrade.alerts import AlertLevel, Notifier
 from aitrade.backtest.alpaca_adapter import df_to_bars
 from aitrade.brokers.base import BrokerClient
 from aitrade.calendar.client import EconomicCalendarClient
@@ -55,7 +56,7 @@ from aitrade.journal.round_trips import RoundTripReconciler, TradeRoundTrip
 from aitrade.journal.similarity import SimilarityQuery, SimilarTradesFinder
 from aitrade.logging.trade_logger import EventType, TradeLogger
 from aitrade.market.freshness import StaleDataError, assert_bars_fresh
-from aitrade.market.snapshot import MarketSnapshotFetcher
+from aitrade.market.snapshot import MarketSnapshotFetcher, is_in_volatile_open_close
 from aitrade.news.client import AlpacaNewsClient
 from aitrade.patterns.base import PatternSignal
 from aitrade.patterns.board import CandidateBoard, build_board
@@ -101,6 +102,17 @@ class EngineConfig:
     # Phase 5 — TrendHunter scan on every candidate. Cheap (deterministic
     # math on bars we already have); on by default.
     use_trend_hunter: bool = True
+    # Phase 6 — operational hardening.
+    # Time-of-day gating: skip the first/last N minutes of regular session.
+    # Set to 0 on either side to disable that gate.
+    skip_open_mins: int = 5
+    skip_close_mins: int = 5
+    # Notify when a fill exceeds this notional (USD). 0 disables.
+    large_fill_alert_usd: float = 5_000.0
+    # Daily-loss alerts: warn at 50% of cap, error at 90%. Computed from
+    # ``RiskGate.max_daily_loss_usd``; alert fires once per threshold.
+    daily_loss_warn_pct: float = 0.5
+    daily_loss_error_pct: float = 0.9
 
 
 def _bars_lookback_window(tf: Timeframe, count: int) -> tuple[datetime, datetime]:
@@ -338,6 +350,43 @@ def _build_floor_trader_input(  # noqa: PLR0913 — explicit context fan-in
     )
 
 
+# Track which daily-loss thresholds have already alerted this session, so
+# we don't spam the operator's phone if PnL hovers near the warn threshold.
+# Keys: "warn", "error". Reset implicitly when the engine restarts.
+_DAILY_LOSS_ALERTED: set[str] = set()
+
+
+def _maybe_alert_daily_loss(
+    risk: object, notifier: Notifier, cfg: EngineConfig
+) -> None:
+    """Fire warn / error alerts when daily realized P&L crosses configured
+    fractions of the loss cap. Each threshold fires at most once per process.
+
+    ``risk`` is duck-typed so tests and alternative gates can plug in without
+    importing RiskGate.
+    """
+    daily_pnl = float(getattr(risk, "_daily_realized_pnl", 0.0))
+    cap = float(getattr(risk, "max_daily_loss_usd", 0.0))
+    if cap <= 0 or daily_pnl >= 0:
+        return
+    drawdown = -daily_pnl
+    error_threshold = cap * cfg.daily_loss_error_pct
+    warn_threshold = cap * cfg.daily_loss_warn_pct
+    if drawdown >= error_threshold and "error" not in _DAILY_LOSS_ALERTED:
+        _DAILY_LOSS_ALERTED.add("error")
+        notifier.error(
+            f"daily P&L drawdown ${drawdown:,.2f} crossed "
+            f"{cfg.daily_loss_error_pct * 100:.0f}% of cap ${cap:,.2f} — "
+            "engine will halt at 100%"
+        )
+    elif drawdown >= warn_threshold and "warn" not in _DAILY_LOSS_ALERTED:
+        _DAILY_LOSS_ALERTED.add("warn")
+        notifier.warn(
+            f"daily P&L drawdown ${drawdown:,.2f} crossed "
+            f"{cfg.daily_loss_warn_pct * 100:.0f}% of cap ${cap:,.2f}"
+        )
+
+
 def _resolve_stop_plan(
     decision: FloorTraderDecision,
     *,
@@ -478,12 +527,32 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
     reasoner: FloorTraderReasoner,
     similar_finder: SimilarTradesFinder | None,
     narrative_gen: NarrativeGenerator | None,
+    notifier: Notifier,
     journal: TradeLogger,
     reconciler: RoundTripReconciler,
     cfg: EngineConfig,
 ) -> None:
     cycle_start = datetime.now(UTC)
     logger.info("engine cycle start at {}", cycle_start.isoformat())
+
+    # Time-of-day gate — skip the chronically-noisy first/last N minutes of
+    # regular session. Cheap, deterministic, journaled so post-trade audit
+    # can confirm we ducked the right windows.
+    if is_in_volatile_open_close(
+        cycle_start,
+        skip_open_mins=cfg.skip_open_mins,
+        skip_close_mins=cfg.skip_close_mins,
+    ):
+        journal.record(
+            EventType.TIME_GATED_SKIP,
+            symbol="-",
+            payload={
+                "skip_open_mins": cfg.skip_open_mins,
+                "skip_close_mins": cfg.skip_close_mins,
+            },
+        )
+        logger.info("cycle skipped (volatile open/close window); waiting for next tick")
+        return
 
     discovered: list[DiscoveredTicker] = build_universe(
         movers=movers,
@@ -742,9 +811,33 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
     )
     if not result.accepted:
         journal.log_risk_block(order, result.reason)
+        notifier.warn(
+            f"order blocked: {sym} {order.side.value} qty={order.qty:g} "
+            f"reason={result.reason}"
+        )
         return
     if result.ack is not None:
         journal.log_ack(order, result.ack)
+        notional = abs(order.qty) * reference_price
+        if cfg.large_fill_alert_usd > 0 and notional >= cfg.large_fill_alert_usd:
+            stop_str = (
+                f" stop={stop_plan.stop_loss_price:.2f}"
+                if stop_plan is not None
+                else ""
+            )
+            target_str = (
+                f" target={stop_plan.take_profit_price:.2f}"
+                if stop_plan is not None
+                else ""
+            )
+            notifier.info(
+                f"order submitted: {sym} {order.side.value} qty={order.qty:g} "
+                f"@ ~{reference_price:.2f} (${notional:,.0f}){stop_str}{target_str}"
+            )
+
+    # Daily-loss threshold alerts — fire once per threshold per session via
+    # RiskGate state. Prevents alert spam if we sit near the threshold.
+    _maybe_alert_daily_loss(executor.risk, notifier, cfg)
 
     # Reconcile after each cycle so newly closed round-trips land promptly.
     new_round_trips = reconciler.reconcile()
@@ -763,6 +856,15 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
                 "entry_price": rt.entry_price,
                 "exit_price": rt.exit_price,
             },
+        )
+        # Push the close — info on wins, warn on losses so the operator can
+        # dial AITRADE_ALERT_MIN_LEVEL=warn to mute the wins-only stream.
+        rt_level = AlertLevel.WARN if rt.pnl_usd < 0 else AlertLevel.INFO
+        notifier.notify(
+            f"round-trip closed: {rt.symbol} {rt.pnl_bucket.value} "
+            f"{rt.pnl_pct * 100:+.2f}% (${rt.pnl_usd:+,.2f}) "
+            f"reason={rt.exit_reason.value}",
+            level=rt_level,
         )
         # Phase 1.5: write a Claude-Haiku post-mortem narrative for the closed
         # round-trip. Synchronous (~1s/call); idempotent and best-effort, never
@@ -787,6 +889,7 @@ def run_engine(  # noqa: PLR0913 — top-level orchestrator, intentional fan-in
     reasoner: FloorTraderReasoner,
     similar_finder: SimilarTradesFinder | None,
     narrative_gen: NarrativeGenerator | None,
+    notifier: Notifier | None,
     journal: TradeLogger,
     reconciler: RoundTripReconciler,
     cfg: EngineConfig,
@@ -794,6 +897,15 @@ def run_engine(  # noqa: PLR0913 — top-level orchestrator, intentional fan-in
     """Top-level engine loop. Refuses non-paper brokers by default."""
     if not broker.is_paper:
         raise RuntimeError("engine refuses non-paper broker by default")
+
+    # No notifier configured → no-op. Keeps every send-site None-free.
+    if notifier is None:
+        notifier = Notifier(webhook_url=None)
+
+    notifier.info(
+        f"aitrade engine starting: cycle={cfg.cycle_secs}s "
+        f"duration={cfg.duration} notional=${cfg.target_notional_per_trade:.0f}"
+    )
 
     end_at: datetime | None = None
     if cfg.duration is not None:
@@ -817,6 +929,7 @@ def run_engine(  # noqa: PLR0913 — top-level orchestrator, intentional fan-in
                 reasoner=reasoner,
                 similar_finder=similar_finder,
                 narrative_gen=narrative_gen,
+                notifier=notifier,
                 journal=journal,
                 reconciler=reconciler,
                 cfg=cfg,
@@ -827,9 +940,11 @@ def run_engine(  # noqa: PLR0913 — top-level orchestrator, intentional fan-in
         cycle += 1
         if cfg.max_cycles is not None and cycle >= cfg.max_cycles:
             logger.info("engine reached max_cycles={}; exiting", cfg.max_cycles)
+            notifier.info(f"aitrade engine stopped: max_cycles={cfg.max_cycles}")
             return
         if end_at is not None and datetime.now(UTC) >= end_at:
             logger.info("engine reached duration limit; exiting")
+            notifier.info(f"aitrade engine stopped: duration={cfg.duration}")
             return
 
         time.sleep(cfg.cycle_secs)

@@ -11,7 +11,7 @@ from aitrade.journal.round_trips import (
     PnlBucket,
     RoundTripReconciler,
 )
-from aitrade.journal.views import JournalViews, PatternStats
+from aitrade.journal.views import JournalViews, PatternStats, SummaryStats
 from aitrade.logging.trade_logger import TradeLogger
 
 
@@ -309,3 +309,108 @@ def test_export_for_llm_respects_max_trades(tmp_path: Path) -> None:
         assert "TRADE-001" in digest
         assert "TRADE-002" in digest
         assert "TRADE-003" not in digest
+
+
+# ----- Phase 6 — summary_stats / by-hour / by-regime ------------------------
+
+
+def test_summary_stats_zero_trades_is_empty_not_raise(tmp_path: Path) -> None:
+    """Fresh deploy has no round-trips; CLI must not crash."""
+    with TradeLogger(log_dir=tmp_path, strategy_id="test") as journal:
+        # ensure schema exists even without any rows
+        RoundTripReconciler(journal)
+        s = JournalViews(journal).summary_stats()
+        assert isinstance(s, SummaryStats)
+        assert s.n_trades == 0
+        assert s.win_rate == 0.0
+        assert s.sharpe_annualized == 0.0
+        assert s.max_drawdown_usd == 0.0
+
+
+def test_summary_stats_counts_wins_losses_and_pnl(tmp_path: Path) -> None:
+    base = datetime(2026, 4, 1, 15, 0, tzinfo=UTC)
+    with TradeLogger(log_dir=tmp_path, strategy_id="test") as journal:
+        _seed(journal, trade_id="w1", symbol="AAPL", pattern_hits=["x"],
+              bucket=PnlBucket.WIN, pnl_usd=10.0, pnl_pct=0.01,
+              exit_ts=base)
+        _seed(journal, trade_id="w2", symbol="AAPL", pattern_hits=["x"],
+              bucket=PnlBucket.WIN, pnl_usd=20.0, pnl_pct=0.02,
+              exit_ts=base + timedelta(hours=1))
+        _seed(journal, trade_id="l1", symbol="MSFT", pattern_hits=["y"],
+              bucket=PnlBucket.LOSS, pnl_usd=-15.0, pnl_pct=-0.015,
+              exit_ts=base + timedelta(hours=2))
+        s = JournalViews(journal).summary_stats()
+        assert s.n_trades == 3
+        assert s.n_wins == 2
+        assert s.n_losses == 1
+        assert s.total_pnl_usd == 15.0
+        assert s.avg_win_usd == 15.0  # (10 + 20) / 2
+        assert s.avg_loss_usd == -15.0
+        assert s.win_rate == 2 / 3
+        assert s.expectancy_usd == 5.0  # 15 / 3
+
+
+def test_summary_stats_max_drawdown_finds_largest_pullback(tmp_path: Path) -> None:
+    """Cumulative P&L: +10, +30 (peak), +15 (drawdown 15), -5 (drawdown 35)."""
+    base = datetime(2026, 4, 1, 15, 0, tzinfo=UTC)
+    with TradeLogger(log_dir=tmp_path, strategy_id="test") as journal:
+        for i, pnl in enumerate([10.0, 20.0, -15.0, -20.0]):
+            bucket = PnlBucket.WIN if pnl > 0 else PnlBucket.LOSS
+            _seed(journal, trade_id=f"t-{i}", symbol="AAPL", pattern_hits=["x"],
+                  bucket=bucket, pnl_usd=pnl, pnl_pct=pnl / 1000.0,
+                  exit_ts=base + timedelta(hours=i))
+        s = JournalViews(journal).summary_stats()
+        # Peak after trade 2 = +30; lowest after trade 4 = -5; max DD = 35.
+        assert s.max_drawdown_usd == 35.0
+
+
+def test_summary_stats_sharpe_zero_with_single_day(tmp_path: Path) -> None:
+    """Sharpe needs ≥2 distinct days of returns to be meaningful — return
+    0.0 rather than dividing by zero on a single-day journal."""
+    base = datetime(2026, 4, 1, 15, 0, tzinfo=UTC)
+    with TradeLogger(log_dir=tmp_path, strategy_id="test") as journal:
+        for i, pnl in enumerate([10.0, -5.0]):
+            bucket = PnlBucket.WIN if pnl > 0 else PnlBucket.LOSS
+            _seed(journal, trade_id=f"t-{i}", symbol="AAPL", pattern_hits=["x"],
+                  bucket=bucket, pnl_usd=pnl, pnl_pct=pnl / 1000.0,
+                  exit_ts=base + timedelta(hours=i))
+        assert JournalViews(journal).summary_stats().sharpe_annualized == 0.0
+
+
+def test_win_rate_by_hour_groups_by_entry_hour(tmp_path: Path) -> None:
+    """Two trades opened at 14:00 UTC, one at 18:00 UTC, mixed outcomes."""
+    with TradeLogger(log_dir=tmp_path, strategy_id="test") as journal:
+        # entry_ts is exit_ts - 1h in _seed, so to get entry hour H we pass
+        # exit_ts at H+1.
+        _seed(journal, trade_id="a", symbol="AAPL", pattern_hits=["x"],
+              bucket=PnlBucket.WIN, pnl_usd=1.0, pnl_pct=0.01,
+              exit_ts=datetime(2026, 4, 1, 15, 0, tzinfo=UTC))
+        _seed(journal, trade_id="b", symbol="AAPL", pattern_hits=["x"],
+              bucket=PnlBucket.LOSS, pnl_usd=-1.0, pnl_pct=-0.01,
+              exit_ts=datetime(2026, 4, 1, 15, 30, tzinfo=UTC))
+        _seed(journal, trade_id="c", symbol="AAPL", pattern_hits=["x"],
+              bucket=PnlBucket.WIN, pnl_usd=2.0, pnl_pct=0.02,
+              exit_ts=datetime(2026, 4, 1, 19, 0, tzinfo=UTC))
+        rows = JournalViews(journal).win_rate_by_hour()
+        as_dict = {hour: (n, wins, wr) for hour, n, wins, wr in rows}
+        assert as_dict[14] == (2, 1, 0.5)
+        assert as_dict[18] == (1, 1, 1.0)
+
+
+def test_win_rate_by_regime_buckets_unknown(tmp_path: Path) -> None:
+    """Trades without a regime tag end up under 'unknown'."""
+    base = datetime(2026, 4, 1, 15, 0, tzinfo=UTC)
+    with TradeLogger(log_dir=tmp_path, strategy_id="test") as journal:
+        _seed(journal, trade_id="a", symbol="AAPL", pattern_hits=["x"],
+              bucket=PnlBucket.WIN, pnl_usd=1.0, pnl_pct=0.01,
+              exit_ts=base, regime="risk_on_low_vol")
+        _seed(journal, trade_id="b", symbol="AAPL", pattern_hits=["x"],
+              bucket=PnlBucket.LOSS, pnl_usd=-1.0, pnl_pct=-0.01,
+              exit_ts=base + timedelta(hours=1), regime="risk_on_low_vol")
+        _seed(journal, trade_id="c", symbol="AAPL", pattern_hits=["x"],
+              bucket=PnlBucket.WIN, pnl_usd=2.0, pnl_pct=0.02,
+              exit_ts=base + timedelta(hours=2))  # no regime
+        rows = JournalViews(journal).win_rate_by_regime()
+        as_dict = {regime: (n, wins, wr) for regime, n, wins, wr in rows}
+        assert as_dict["risk_on_low_vol"] == (2, 1, 0.5)
+        assert as_dict["unknown"] == (1, 1, 1.0)
