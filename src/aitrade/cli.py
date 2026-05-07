@@ -981,6 +981,13 @@ def dashboard_cmd(
     port: int | None = typer.Option(
         None, "--port", help="Listen port (default from AITRADE_DASHBOARD_PORT)."
     ),
+    no_auth: bool = typer.Option(
+        False,
+        "--no-auth",
+        help="Dev only: skip basic-auth and force-bind to 127.0.0.1. "
+        "Never use over a network. Required for localhost preview without "
+        "setting AITRADE_DASHBOARD_PASSWORD.",
+    ),
 ) -> None:
     """Start the mobile-friendly dashboard.
 
@@ -992,22 +999,43 @@ def dashboard_cmd(
     import uvicorn
 
     from aitrade.dashboard.app import build_app
+    from aitrade.dashboard.auth import require_auth
 
     s = get_settings()
     configure_logging(s.aitrade_log_dir, s.aitrade_log_level)
-    if not s.aitrade_dashboard_password.get_secret_value():
+    if not no_auth and not s.aitrade_dashboard_password.get_secret_value():
         console.print(
             "[red]AITRADE_DASHBOARD_PASSWORD missing.[/red] "
-            "Set a strong password in .env before exposing the dashboard."
+            "Set a strong password in .env, or pass --no-auth for localhost dev."
         )
         raise typer.Exit(code=1)
 
     fastapi_app = build_app(settings=s)
     bind_host = host or s.aitrade_dashboard_host
     bind_port = port or s.aitrade_dashboard_port
+
+    if no_auth:
+        # Bypass the auth dep entirely. Force 127.0.0.1 so this is never
+        # reachable from the LAN — no password + open port = bad combo.
+        fastapi_app.dependency_overrides[require_auth] = lambda: "no-auth-dev"
+        if bind_host not in {"127.0.0.1", "localhost"}:
+            console.print(
+                f"[yellow]--no-auth: ignoring host={bind_host!r}, "
+                "binding to 127.0.0.1 only[/yellow]"
+            )
+            bind_host = "127.0.0.1"
+        console.print(
+            "[yellow]⚠️  --no-auth: dashboard is unauthenticated — "
+            "localhost-only.[/yellow]"
+        )
+
     console.print(
-        f"[cyan]Dashboard listening[/cyan] on http://{bind_host}:{bind_port} — "
-        f"basic-auth password from AITRADE_DASHBOARD_PASSWORD"
+        f"[cyan]Dashboard listening[/cyan] on http://{bind_host}:{bind_port}"
+        + (
+            ""
+            if no_auth
+            else " — basic-auth password from AITRADE_DASHBOARD_PASSWORD"
+        )
     )
     uvicorn.run(fastapi_app, host=bind_host, port=bind_port, log_level="warning")
 
