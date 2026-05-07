@@ -1,0 +1,145 @@
+{% extends "_layout.html" %}
+{% block content %}
+
+<h1>Overview</h1>
+<p class="page-sub">Account state, today's activity, and recent round-trip performance.</p>
+
+{# Top KPI strip #}
+<div class="grid cols-4">
+  <div class="card kpi">
+    <div class="label">Equity</div>
+    <div class="value lg">{{ account.equity | money if account else '—' }}</div>
+    <div class="sub">{{ account.currency if account else 'paper' }}</div>
+  </div>
+  <div class="card kpi">
+    <div class="label">Cash</div>
+    <div class="value">{{ account.cash | money if account else '—' }}</div>
+    <div class="sub muted">Buying power {{ account.buying_power | money if account else '—' }}</div>
+  </div>
+  <div class="card kpi">
+    <div class="label">Realized P&L · today</div>
+    <div class="value {{ 'green' if today.realized_pnl_today_usd > 0 else ('red' if today.realized_pnl_today_usd < 0 else '') }}">
+      {{ today.realized_pnl_today_usd | money }}
+    </div>
+    <div class="sub muted">{{ today.n_round_trips }} closed today</div>
+  </div>
+  <div class="card kpi">
+    <div class="label">Win / Loss</div>
+    <div class="value">
+      <span class="green">{{ wins }}</span>
+      <span class="muted">/</span>
+      <span class="red">{{ losses }}</span>
+    </div>
+    <div class="sub muted">
+      {% set hr = wins / (wins + losses) if (wins + losses) > 0 else 0 %}
+      {{ '%.0f%%' | format(hr * 100) }} hit rate · {{ total_pnl | money }} net
+    </div>
+  </div>
+</div>
+
+{# Today section #}
+<h2>Today</h2>
+<div class="grid cols-3">
+  <div class="card kpi"><div class="label">Decisions</div><div class="value">{{ today.n_decisions }}</div></div>
+  <div class="card kpi"><div class="label">Orders</div><div class="value">{{ today.n_orders }}</div></div>
+  <div class="card kpi"><div class="label">Closed round-trips</div><div class="value">{{ today.n_round_trips }}</div></div>
+</div>
+
+{# Open positions #}
+<h2>Open positions</h2>
+<div class="card tight">
+{% if positions %}
+  <table>
+    <thead><tr>
+      <th>Symbol</th><th class="right">Qty</th><th class="right">Avg entry</th>
+      <th class="right">Market value</th><th class="right">Unrealized</th>
+    </tr></thead>
+    <tbody>
+    {% for p in positions %}
+      <tr>
+        <td><strong>{{ p.symbol }}</strong></td>
+        <td class="right mono">{{ "%.2f"|format(p.qty) }}</td>
+        <td class="right mono">{{ "%.2f"|format(p.avg_entry_price) }}</td>
+        <td class="right mono">{{ p.market_value | money }}</td>
+        <td class="right mono {{ 'green' if p.unrealized_pnl > 0 else ('red' if p.unrealized_pnl < 0 else '') }}">
+          {{ p.unrealized_pnl | money }}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <div class="empty">Flat — no open positions.</div>
+{% endif %}
+</div>
+
+{# Recent decisions #}
+<h2>Recent decisions</h2>
+<div class="card">
+{% if recent_decisions %}
+  {% for d in recent_decisions %}
+    <div style="padding: 8px 0; border-bottom: 1px solid var(--border);">
+      <div class="row">
+        <span>
+          <strong>{{ d.symbol or '—' }}</strong>
+          {% if d.should_trade %}
+            <span class="pill info">{{ (d.direction or '?')|upper }}</span>
+          {% else %}
+            <span class="pill">PASS</span>
+          {% endif %}
+        </span>
+        <span class="xs muted">conf {{ "%.2f"|format(d.confidence or 0) }}</span>
+      </div>
+      <div class="small muted" style="margin-top:2px;">
+        {{ d.thesis or d.reason_for_pass or '—' }}
+      </div>
+      <div class="xs muted">{{ d.timestamp }}</div>
+    </div>
+  {% endfor %}
+{% else %}
+  <div class="empty">Engine hasn't reasoned yet.</div>
+{% endif %}
+</div>
+
+{# Round-trip history #}
+<h2>Recent round-trips · {{ wins }}W / {{ losses }}L · {{ total_pnl | money }}</h2>
+<div class="card tight">
+{% if round_trips %}
+  <table>
+    <thead><tr>
+      <th>Symbol</th><th>When</th>
+      <th class="right">Entry → Exit</th>
+      <th class="right">P&L</th>
+      <th class="right">%</th>
+      <th>Outcome</th>
+    </tr></thead>
+    <tbody>
+    {% for r in round_trips %}
+      <tr>
+        <td><strong>{{ r.symbol }}</strong></td>
+        <td class="small">{{ r.exit_ts | ago }}</td>
+        <td class="right small mono">
+          {{ "%.2f"|format(r.entry_price) }} → {{ "%.2f"|format(r.exit_price) }}
+        </td>
+        <td class="right mono {{ 'green' if r.pnl_usd > 0 else 'red' }}">
+          {{ r.pnl_usd | money }}
+        </td>
+        <td class="right mono {{ 'green' if r.pnl_pct > 0 else 'red' }}">
+          {{ r.pnl_pct | pct }}
+        </td>
+        <td>
+          <span class="pill {{ 'ok' if r.pnl_bucket == 'WIN' else ('warn' if r.pnl_bucket == 'BREAKEVEN' else '') }}"
+                style="{{ 'color:#fca5a5;background:rgba(239,68,68,0.12);border-color:#5a2828;' if r.pnl_bucket == 'LOSS' else '' }}">
+            {{ r.pnl_bucket }}
+          </span>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <div class="empty">No closed round-trips yet — go run the engine.</div>
+{% endif %}
+</div>
+
+{% endblock %}

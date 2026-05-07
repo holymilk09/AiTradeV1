@@ -1,0 +1,78 @@
+{% extends "_layout.html" %}
+{% block content %}
+
+<h1>Screener</h1>
+<p class="page-sub">
+  Latest discovery + pattern scan dump. The same data the floor-trader
+  saw on its last cycle.
+</p>
+
+{# Discovery scan #}
+<h2>
+  Discovery scan
+  {% if last_discovery_ts %}
+    <span class="muted xs" style="font-weight:400; text-transform:none; letter-spacing:0;">
+      {{ last_discovery_ts | ago }}
+    </span>
+  {% endif %}
+</h2>
+<div class="card tight">
+{% if discovered_tickers %}
+  <table>
+    <thead><tr>
+      <th>#</th><th>Symbol</th>
+      <th class="right">Buzz score</th>
+    </tr></thead>
+    <tbody>
+    {% for t in discovered_tickers %}
+      <tr>
+        <td class="muted">{{ loop.index }}</td>
+        <td><strong>{{ t.symbol }}</strong></td>
+        <td class="right mono {{ 'green' if t.buzz_score > 0.5 else 'muted' }}">
+          {{ "%.3f"|format(t.buzz_score) }}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <div class="empty">No discovery scan yet — engine hasn't ticked.</div>
+{% endif %}
+</div>
+
+{# Pattern hits #}
+<h2>Pattern hits · last cycle</h2>
+<div class="card tight">
+{% if pattern_events %}
+  <table>
+    <thead><tr>
+      <th>Symbol</th><th>Pattern</th>
+      <th class="right">Score</th><th>Direction</th>
+      <th>Evidence</th>
+    </tr></thead>
+    <tbody>
+    {% for ev in pattern_events %}
+      {% for p in ev.payload.patterns %}
+        <tr>
+          <td><strong>{{ ev.symbol }}</strong></td>
+          <td><span class="pill">{{ p.name }}</span></td>
+          <td class="right mono">{{ "%.2f"|format(p.score) }}</td>
+          <td>
+            <span class="pill {{ 'ok' if p.direction == 'long' else ('warn' if p.direction == 'short' else '') }}">
+              {{ p.direction }}
+            </span>
+          </td>
+          <td class="xs muted mono" style="word-break:break-all;">
+            {{ p.evidence | tojson }}
+          </td>
+        </tr>
+      {% endfor %}
+    {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <div class="empty">No pattern hits in the last cycle.</div>
+{% endif %}
+</div>
+
+{% endblock %}

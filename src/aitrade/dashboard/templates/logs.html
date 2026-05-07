@@ -1,0 +1,48 @@
+{% extends "_layout.html" %}
+{% block content %}
+
+<h1>Logs</h1>
+<p class="page-sub">
+  Raw event timeline from the trade journal. Filter by event type to drill in.
+</p>
+
+<form class="filters" method="get" action="/logs">
+  <select name="event_type">
+    <option value="">All event types</option>
+    {% for t in event_types %}
+      <option value="{{ t }}" {{ 'selected' if filter_type == t else '' }}>{{ t }}</option>
+    {% endfor %}
+  </select>
+  <button class="btn primary sm" type="submit">Apply</button>
+  <a class="btn sm" href="/logs">Clear</a>
+</form>
+
+<div class="card tight">
+{% if events %}
+  <table>
+    <thead><tr>
+      <th>When</th><th>Event</th><th>Symbol</th><th>Payload (preview)</th>
+    </tr></thead>
+    <tbody>
+    {% for ev in events %}
+      <tr>
+        <td class="small muted mono">{{ ev.timestamp.strftime('%m/%d %H:%M:%S') }}</td>
+        <td><span class="pill {{ event_pill_class(ev.event_type) }}">{{ ev.event_type }}</span></td>
+        <td><strong>{{ ev.symbol }}</strong></td>
+        <td class="xs muted mono" style="max-width:600px; word-break:break-all;">
+          {{ payload_preview(ev.payload) }}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <div class="empty">No events {{ '(matching filter)' if filter_type else 'yet' }}.</div>
+{% endif %}
+</div>
+
+<p class="muted xs" style="margin-top:10px;">
+  Showing {{ events|length }} of up to {{ limit }} events.
+</p>
+
+{% endblock %}

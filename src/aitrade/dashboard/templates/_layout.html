@@ -1,0 +1,370 @@
+{# Phase 7 layout: side nav + content area. Mobile collapses nav to top bar. #}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="aitrade">
+  <meta name="theme-color" content="#0a0c10">
+  <title>{{ active_tab|capitalize }} · aitrade</title>
+  <style>
+    :root {
+      --bg: #0a0c10;
+      --bg-elev: #0f1218;
+      --card: #141821;
+      --card-elev: #1a1f2a;
+      --border: #232a36;
+      --border-strong: #2f3744;
+      --text: #e8eaed;
+      --text-dim: #9aa3af;
+      --text-muted: #6b7280;
+      --green: #34d399;
+      --green-bg: rgba(52, 211, 153, 0.12);
+      --red: #ef4444;
+      --red-bg: rgba(239, 68, 68, 0.12);
+      --amber: #f59e0b;
+      --amber-bg: rgba(245, 158, 11, 0.12);
+      --blue: #60a5fa;
+      --blue-bg: rgba(96, 165, 250, 0.12);
+      --purple: #a78bfa;
+      --nav-w: 220px;
+      --footer-h: 56px;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter",
+                   "Segoe UI", system-ui, sans-serif;
+      background: var(--bg); color: var(--text);
+      font-size: 14px;
+      letter-spacing: -0.005em;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+
+    /* Layout */
+    .app {
+      display: grid;
+      grid-template-columns: var(--nav-w) 1fr;
+      grid-template-rows: 1fr auto;
+      grid-template-areas: "nav main" "nav footer";
+      min-height: 100vh;
+    }
+    nav.side {
+      grid-area: nav;
+      background: var(--bg-elev);
+      border-right: 1px solid var(--border);
+      padding: 18px 0;
+      position: sticky; top: 0;
+      max-height: 100vh; overflow-y: auto;
+    }
+    .brand {
+      padding: 0 20px 18px;
+      font-weight: 700; font-size: 17px;
+      letter-spacing: -0.01em;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .brand .pill { font-size: 10px; }
+    nav.side ul { list-style: none; padding: 0; margin: 0; }
+    nav.side li a {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 20px; color: var(--text-dim);
+      border-left: 2px solid transparent;
+      font-weight: 500; font-size: 13.5px;
+      text-decoration: none;
+    }
+    nav.side li a:hover { color: var(--text); background: var(--card); }
+    nav.side li a.active {
+      color: var(--text);
+      background: var(--card);
+      border-left-color: var(--blue);
+    }
+    nav.side .nav-icon {
+      display: inline-block; width: 18px; text-align: center;
+      opacity: 0.85; font-size: 14px;
+    }
+    nav.side .group-label {
+      padding: 16px 20px 6px;
+      font-size: 10px; font-weight: 600; text-transform: uppercase;
+      color: var(--text-muted); letter-spacing: 0.08em;
+    }
+
+    main.content {
+      grid-area: main;
+      padding: 22px 28px 28px;
+      max-width: 1400px;
+      width: 100%;
+    }
+    h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
+    .page-sub { color: var(--text-dim); margin: 0 0 18px; font-size: 13px; }
+    h2 { font-size: 12px; font-weight: 600; margin: 22px 0 10px;
+         text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+
+    /* Cards */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .card.tight { padding: 10px 12px; }
+    .card-head {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .card-title { font-size: 12px; color: var(--text-muted);
+                  text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+
+    .grid { display: grid; gap: 12px; }
+    .grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
+    .grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+    .grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
+
+    /* KPI tiles */
+    .kpi { display: flex; flex-direction: column; gap: 4px; }
+    .kpi .label { font-size: 11px; color: var(--text-muted);
+                  text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+    .kpi .value { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+    .kpi .sub { font-size: 12px; color: var(--text-dim); }
+    .kpi .value.lg { font-size: 28px; }
+
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .muted { color: var(--text-dim); }
+    .small { font-size: 12px; }
+    .xs { font-size: 11px; }
+    .green { color: var(--green); }
+    .red { color: var(--red); }
+    .amber { color: var(--amber); }
+    .blue { color: var(--blue); }
+
+    /* Pills */
+    .pill {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 2px 8px; border-radius: 999px;
+      font-size: 10px; font-weight: 600; letter-spacing: 0.04em;
+      background: var(--card-elev); color: var(--text-dim);
+      border: 1px solid var(--border-strong);
+      text-transform: uppercase;
+    }
+    .pill.live { background: var(--red-bg); color: #fca5a5; border-color: #5a2828; }
+    .pill.paper { background: var(--green-bg); color: var(--green); border-color: #2a5a3f; }
+    .pill.kill { background: var(--red-bg); color: #fca5a5; border-color: #5a2828; }
+    .pill.ok { background: var(--green-bg); color: var(--green); border-color: #2a5a3f; }
+    .pill.warn { background: var(--amber-bg); color: var(--amber); border-color: #5a3f12; }
+    .pill.info { background: var(--blue-bg); color: var(--blue); border-color: #1f3f5a; }
+
+    /* Tables */
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+    th { color: var(--text-muted); font-weight: 500; font-size: 11px;
+         text-transform: uppercase; letter-spacing: 0.04em;
+         background: transparent; }
+    td.right, th.right { text-align: right; }
+    tr:hover { background: var(--card-elev); }
+
+    /* Buttons */
+    form { display: inline; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 8px 14px; border-radius: 8px;
+      border: 1px solid var(--border-strong); background: var(--card-elev); color: var(--text);
+      font-size: 13px; font-weight: 500; cursor: pointer; text-decoration: none;
+      font-family: inherit;
+    }
+    .btn:hover { background: var(--card); }
+    .btn.danger { background: rgba(239, 68, 68, 0.15); border-color: #5a2828; color: #fca5a5; }
+    .btn.warn { background: rgba(245, 158, 11, 0.18); border-color: #5a3f12; color: var(--amber); }
+    .btn.ok { background: rgba(52, 211, 153, 0.15); border-color: #2a5a3f; color: var(--green); }
+    .btn.primary { background: rgba(96, 165, 250, 0.18); border-color: #1f3f5a; color: var(--blue); }
+    .btn.sm { padding: 4px 10px; font-size: 12px; }
+
+    /* Sector heatmap */
+    .heatmap { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+               gap: 6px; }
+    .sector {
+      padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: 2px; min-height: 56px;
+    }
+    .sector .sym { font-weight: 600; font-size: 13px; }
+    .sector .pct { font-size: 14px; font-weight: 600; }
+    .sector.up { background: var(--green-bg); border-color: rgba(52, 211, 153, 0.3); }
+    .sector.down { background: var(--red-bg); border-color: rgba(239, 68, 68, 0.3); }
+    .sector.flat { background: var(--card-elev); }
+
+    /* Score bar */
+    .bar-track {
+      width: 60px; height: 6px; border-radius: 3px;
+      background: var(--card-elev); overflow: hidden; display: inline-block;
+      vertical-align: middle; margin-right: 6px;
+    }
+    .bar-fill { height: 100%; background: var(--blue); }
+    .bar-fill.green { background: var(--green); }
+    .bar-fill.amber { background: var(--amber); }
+
+    /* Footer (controls) */
+    footer.controls {
+      grid-area: footer;
+      background: var(--bg-elev);
+      border-top: 1px solid var(--border);
+      padding: 12px 28px;
+      display: flex; gap: 8px; align-items: center;
+    }
+    footer.controls .spacer { flex: 1; }
+
+    .empty {
+      color: var(--text-muted); font-size: 13px; padding: 20px;
+      text-align: center; font-style: italic;
+    }
+
+    /* Forms */
+    .filters {
+      display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;
+    }
+    .filters input, .filters select {
+      background: var(--card); color: var(--text);
+      border: 1px solid var(--border-strong); border-radius: 6px;
+      padding: 6px 10px; font-size: 13px; font-family: inherit;
+    }
+    .filters input:focus, .filters select:focus {
+      outline: none; border-color: var(--blue);
+    }
+
+    /* Chat */
+    .chat-thread {
+      display: flex; flex-direction: column; gap: 10px;
+      max-height: calc(100vh - 280px); overflow-y: auto;
+      padding: 4px 2px;
+    }
+    .msg { padding: 10px 14px; border-radius: 10px; max-width: 85%;
+           white-space: pre-wrap; word-wrap: break-word; line-height: 1.5; }
+    .msg.user { align-self: flex-end;
+                background: rgba(96, 165, 250, 0.15);
+                border: 1px solid rgba(96, 165, 250, 0.25); }
+    .msg.assistant { align-self: flex-start;
+                     background: var(--card-elev);
+                     border: 1px solid var(--border); }
+    .msg .who { font-size: 10px; color: var(--text-muted); text-transform: uppercase;
+                letter-spacing: 0.05em; font-weight: 600; margin-bottom: 4px; }
+    .chat-input {
+      display: flex; gap: 8px; margin-top: 12px;
+    }
+    .chat-input textarea {
+      flex: 1; background: var(--card); color: var(--text);
+      border: 1px solid var(--border-strong); border-radius: 8px;
+      padding: 10px 12px; font-size: 13px; font-family: inherit;
+      resize: vertical; min-height: 60px;
+    }
+    .chat-input textarea:focus { outline: none; border-color: var(--blue); }
+
+    /* Mobile */
+    @media (max-width: 880px) {
+      .app {
+        grid-template-columns: 1fr;
+        grid-template-areas: "nav" "main" "footer";
+      }
+      nav.side {
+        position: static;
+        max-height: none;
+        padding: 10px 0;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+      }
+      nav.side ul {
+        display: flex; overflow-x: auto; gap: 2px;
+        padding: 0 12px;
+      }
+      nav.side li a {
+        padding: 8px 12px;
+        border-left: none; border-bottom: 2px solid transparent;
+        white-space: nowrap;
+      }
+      nav.side li a.active {
+        border-left: none; border-bottom-color: var(--blue);
+      }
+      nav.side .group-label { display: none; }
+      nav.side .brand { padding: 0 16px 10px; }
+      main.content { padding: 14px; }
+      .grid.cols-3, .grid.cols-4 { grid-template-columns: repeat(2, 1fr); }
+      footer.controls { padding: 10px 14px; }
+    }
+  </style>
+  {% block head %}{% endblock %}
+</head>
+<body>
+
+<div class="app">
+
+<nav class="side">
+  <div class="brand">
+    aitrade
+    {% if account %}
+      <span class="pill {{ 'paper' if account.is_paper else 'live' }}">
+        {{ 'paper' if account.is_paper else 'LIVE' }}
+      </span>
+    {% endif %}
+    {% if kill_switch_active %}<span class="pill kill">halted</span>{% endif %}
+  </div>
+
+  <div class="group-label">Trading</div>
+  <ul>
+    {% for tab, label, icon in [
+        ('overview', 'Overview', '◫'),
+        ('live',     'Live',     '●'),
+        ('screener', 'Screener', '⚲'),
+        ('chat',     'Chat',     '✦'),
+    ] %}
+    <li>
+      <a href="/{{ tab }}" class="{{ 'active' if active_tab == tab else '' }}">
+        <span class="nav-icon">{{ icon }}</span>{{ label }}
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+
+  <div class="group-label">Review</div>
+  <ul>
+    {% for tab, label, icon in [
+        ('history',    'History',    '⌘'),
+        ('strategies', 'Strategies', '☰'),
+        ('logs',       'Logs',       '≣'),
+    ] %}
+    <li>
+      <a href="/{{ tab }}" class="{{ 'active' if active_tab == tab else '' }}">
+        <span class="nav-icon">{{ icon }}</span>{{ label }}
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+</nav>
+
+<main class="content">
+  {% block content %}{% endblock %}
+</main>
+
+<footer class="controls">
+  {% if kill_switch_active %}
+    <form action="/control/resume" method="post">
+      <button class="btn ok" type="submit">▶︎ Resume</button>
+    </form>
+  {% else %}
+    <form action="/control/halt" method="post">
+      <button class="btn warn" type="submit">⏸︎ Halt</button>
+    </form>
+  {% endif %}
+  <form action="/control/flatten" method="post"
+        onsubmit="return confirm('Cancel all orders + close every position?');">
+    <button class="btn danger" type="submit">⚠︎ Flatten All</button>
+  </form>
+  <form action="/control/reconcile" method="post">
+    <button class="btn" type="submit">⟳ Reconcile</button>
+  </form>
+  <span class="spacer"></span>
+  <span class="muted xs">aitrade · {{ active_tab }}</span>
+</footer>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,125 @@
+{% extends "_layout.html" %}
+{% block head %}
+{# Auto-refresh once a minute so the live tab updates without intervention. #}
+<meta http-equiv="refresh" content="60">
+{% endblock %}
+{% block content %}
+
+<h1>Live</h1>
+<p class="page-sub">
+  What the engine is looking at right now — market regime, sector breadth,
+  and the latest candidate board. Refreshes every 60s.
+</p>
+
+{# Market snapshot strip #}
+<h2>Market</h2>
+{% if snapshot %}
+  <div class="grid cols-4">
+    <div class="card kpi">
+      <div class="label">SPY</div>
+      <div class="value {{ 'green' if snapshot.spy_change_pct > 0 else ('red' if snapshot.spy_change_pct < 0 else '') }}">
+        {{ "%.2f"|format(snapshot.spy_price) }}
+      </div>
+      <div class="sub mono">
+        {{ "%+.2f%%"|format(snapshot.spy_change_pct) }}
+      </div>
+    </div>
+    <div class="card kpi">
+      <div class="label">QQQ</div>
+      <div class="value {{ 'green' if snapshot.qqq_change_pct > 0 else ('red' if snapshot.qqq_change_pct < 0 else '') }}">
+        {{ "%.2f"|format(snapshot.qqq_price) }}
+      </div>
+      <div class="sub mono">
+        {{ "%+.2f%%"|format(snapshot.qqq_change_pct) }}
+      </div>
+    </div>
+    <div class="card kpi">
+      <div class="label">VIX</div>
+      <div class="value {{ 'red' if snapshot.vix > 25 else ('amber' if snapshot.vix > 18 else 'green') }}">
+        {{ "%.1f"|format(snapshot.vix) }}
+      </div>
+      <div class="sub muted">
+        {{ 'high vol' if snapshot.vix > 20 else 'low vol' }}
+      </div>
+    </div>
+    <div class="card kpi">
+      <div class="label">Regime · Session</div>
+      <div class="value" style="font-size:18px;">{{ snapshot.regime|replace('_', ' ') }}</div>
+      <div class="sub">
+        <span class="pill info">{{ snapshot.session }}</span>
+        <span class="muted xs">snapshot age {{ "%.0f"|format(snapshot.age_secs or 0) }}s</span>
+      </div>
+    </div>
+  </div>
+
+  {% if snapshot.sector_changes_pct %}
+    <h2>Sector breadth · 1d %</h2>
+    <div class="heatmap">
+      {% for sym, pct in snapshot.sector_changes_pct|dictsort %}
+        <div class="sector {{ 'up' if pct > 0.1 else ('down' if pct < -0.1 else 'flat') }}">
+          <span class="sym">{{ sym }}</span>
+          <span class="pct mono {{ 'green' if pct > 0 else ('red' if pct < 0 else 'muted') }}">
+            {{ "%+.2f%%"|format(pct) }}
+          </span>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+{% else %}
+  <div class="card empty">No market snapshot yet — engine hasn't ticked.</div>
+{% endif %}
+
+{# Candidate board — what the engine is looking at #}
+<h2>
+  Candidate board
+  {% if board_built_at %}
+    <span class="muted xs" style="font-weight:400; text-transform:none; letter-spacing:0;">
+      built {{ board_built_at | ago }}
+    </span>
+  {% endif %}
+</h2>
+<div class="card tight">
+{% if candidates %}
+  <table>
+    <thead><tr>
+      <th>#</th><th>Symbol</th>
+      <th class="right">Combined</th>
+      <th class="right">Buzz</th>
+      <th class="right">Pattern</th>
+      <th class="right">Trend</th>
+      <th>Patterns hit</th>
+    </tr></thead>
+    <tbody>
+    {% for c in candidates %}
+      <tr>
+        <td class="muted">{{ loop.index }}</td>
+        <td><strong>{{ c.symbol }}</strong></td>
+        <td class="right mono {{ 'green' if c.combined_score > 0 else ('muted' if c.combined_score == 0 else 'amber') }}">
+          {{ "%+.2f"|format(c.combined_score) }}
+        </td>
+        <td class="right small">
+          <span class="bar-track"><span class="bar-fill" style="width: {{ (c.buzz_score|abs * 30)|round }}px;"></span></span>
+          <span class="mono">{{ "%.2f"|format(c.buzz_score) }}</span>
+        </td>
+        <td class="right small">
+          <span class="bar-track"><span class="bar-fill amber" style="width: {{ (c.pattern_score * 30)|round }}px;"></span></span>
+          <span class="mono">{{ "%.2f"|format(c.pattern_score) }}</span>
+        </td>
+        <td class="right small">
+          <span class="bar-track"><span class="bar-fill green" style="width: {{ (c.trend_score * 60)|round }}px;"></span></span>
+          <span class="mono">{{ "%.2f"|format(c.trend_score) }}</span>
+        </td>
+        <td class="small">
+          {% for h in c.pattern_hits %}<span class="pill">{{ h }}</span> {% endfor %}
+          {% if not c.pattern_hits %}<span class="muted xs">—</span>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <div class="empty">No candidate board yet — engine hasn't run a cycle.</div>
+{% endif %}
+</div>
+
+{% endblock %}

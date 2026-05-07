@@ -289,6 +289,279 @@ def _scalar(
     return cast(row[0])
 
 
+# --- Phase 7 dashboard rebuild — additional data sources --------------------
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyStatRow:
+    strategy_id: str
+    n_trades: int
+    n_wins: int
+    n_losses: int
+    win_rate: float
+    total_pnl_usd: float
+    avg_pnl_usd: float
+
+
+@dataclass(frozen=True, slots=True)
+class EventRow:
+    event_id: str
+    event_type: str
+    symbol: str
+    timestamp: datetime
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateRow:
+    """Trimmed candidate row for the Live tab — pulled from the most-recent
+    CANDIDATE_BOARD event in the journal."""
+
+    symbol: str
+    combined_score: float
+    buzz_score: float
+    pattern_score: float
+    trend_score: float
+    pattern_hits: list[str]
+
+
+def _ro_conn(log_dir: Path) -> sqlite3.Connection | None:
+    """One-shot read-only sqlite handle, or None if the journal isn't there yet."""
+    db_path = log_dir / "trades.sqlite"
+    if not db_path.exists():
+        return None
+    try:
+        return sqlite3.connect(
+            f"file:{db_path}?mode=ro", uri=True, isolation_level=None
+        )
+    except sqlite3.OperationalError:
+        return None
+
+
+def fetch_strategy_stats(log_dir: Path) -> list[StrategyStatRow]:
+    """Per-strategy roll-up over closed round-trips."""
+    conn = _ro_conn(log_dir)
+    if conn is None:
+        return []
+    try:
+        cur = conn.execute(
+            "SELECT strategy_id, pnl_usd, pnl_bucket FROM round_trips"
+        )
+        rows = cur.fetchall()
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        conn.close()
+
+    by_strat: dict[str, dict[str, float]] = {}
+    for sid, pnl_usd, bucket in rows:
+        s = sid or "unknown"
+        slot = by_strat.setdefault(
+            s, {"n": 0, "wins": 0, "losses": 0, "total": 0.0}
+        )
+        slot["n"] += 1
+        with contextlib.suppress(TypeError, ValueError):
+            slot["total"] += float(pnl_usd)
+        if str(bucket) == PnlBucket.WIN.value:
+            slot["wins"] += 1
+        elif str(bucket) == PnlBucket.LOSS.value:
+            slot["losses"] += 1
+
+    out: list[StrategyStatRow] = []
+    for strat, slot in by_strat.items():
+        n = int(slot["n"])
+        wins = int(slot["wins"])
+        losses = int(slot["losses"])
+        total = float(slot["total"])
+        out.append(
+            StrategyStatRow(
+                strategy_id=strat,
+                n_trades=n,
+                n_wins=wins,
+                n_losses=losses,
+                win_rate=wins / n if n else 0.0,
+                total_pnl_usd=total,
+                avg_pnl_usd=total / n if n else 0.0,
+            )
+        )
+    out.sort(key=lambda r: r.n_trades, reverse=True)
+    return out
+
+
+def fetch_recent_events(
+    log_dir: Path,
+    *,
+    event_type: str | None = None,
+    limit: int = 100,
+) -> list[EventRow]:
+    """Recent events from the journal SQLite mirror, newest first."""
+    conn = _ro_conn(log_dir)
+    if conn is None:
+        return []
+    try:
+        if event_type:
+            cur = conn.execute(
+                "SELECT event_id, event_type, symbol, timestamp, payload "
+                "FROM trade_events WHERE event_type = ? "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (event_type, limit),
+            )
+        else:
+            cur = conn.execute(
+                "SELECT event_id, event_type, symbol, timestamp, payload "
+                "FROM trade_events ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            )
+        rows = cur.fetchall()
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        conn.close()
+
+    out: list[EventRow] = []
+    for event_id, etype, symbol, ts, payload in rows:
+        try:
+            ts_dt = datetime.fromisoformat(ts)
+        except (TypeError, ValueError):
+            continue
+        try:
+            data = json.loads(payload) if payload else {}
+        except json.JSONDecodeError:
+            data = {"raw": payload}
+        out.append(
+            EventRow(
+                event_id=event_id,
+                event_type=etype,
+                symbol=symbol or "-",
+                timestamp=ts_dt,
+                payload=data if isinstance(data, dict) else {"value": data},
+            )
+        )
+    return out
+
+
+def fetch_event_types(log_dir: Path) -> list[str]:
+    """Distinct event_type values present in the journal — for filter UI."""
+    conn = _ro_conn(log_dir)
+    if conn is None:
+        return []
+    try:
+        cur = conn.execute(
+            "SELECT DISTINCT event_type FROM trade_events ORDER BY event_type"
+        )
+        return [str(row[0]) for row in cur.fetchall()]
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        conn.close()
+
+
+def fetch_latest_candidate_board(
+    log_dir: Path,
+    *,
+    limit: int = 20,
+) -> tuple[datetime | None, list[CandidateRow]]:
+    """Most-recent CANDIDATE_BOARD event projected into ``CandidateRow``s."""
+    events = fetch_recent_events(log_dir, event_type="candidate_board", limit=1)
+    if not events:
+        return None, []
+    payload = events[0].payload
+    raw = payload.get("candidates", [])
+    if not isinstance(raw, list):
+        return events[0].timestamp, []
+    rows: list[CandidateRow] = []
+    for c in raw[:limit]:
+        if not isinstance(c, dict):
+            continue
+        rows.append(
+            CandidateRow(
+                symbol=str(c.get("symbol", "?")),
+                combined_score=float(c.get("combined_score", 0.0) or 0.0),
+                buzz_score=float(c.get("buzz_score", 0.0) or 0.0),
+                pattern_score=float(c.get("pattern_score", 0.0) or 0.0),
+                trend_score=float(c.get("trend_score", 0.0) or 0.0),
+                pattern_hits=[str(h) for h in c.get("pattern_hits", []) or []],
+            )
+        )
+    return events[0].timestamp, rows
+
+
+def fetch_latest_market_snapshot(log_dir: Path) -> dict[str, Any] | None:
+    """Most-recent MARKET_SNAPSHOT event payload, or None."""
+    events = fetch_recent_events(log_dir, event_type="market_snapshot", limit=1)
+    if not events:
+        return None
+    return events[0].payload
+
+
+def fetch_filtered_round_trips(
+    log_dir: Path,
+    *,
+    symbol: str | None = None,
+    pattern: str | None = None,
+    bucket: str | None = None,
+    regime: str | None = None,
+    limit: int = 200,
+) -> list[JournalRow]:
+    """History tab: round-trips with optional filters, newest first."""
+    conn = _ro_conn(log_dir)
+    if conn is None:
+        return []
+    try:
+        clauses: list[str] = []
+        params: list[object] = []
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(symbol.upper())
+        if pattern:
+            clauses.append("pattern_hits LIKE ?")
+            params.append(f'%"{pattern}"%')
+        if bucket:
+            clauses.append("pnl_bucket = ?")
+            params.append(bucket.upper())
+        if regime:
+            clauses.append("market_snapshot LIKE ?")
+            params.append(f'%"regime": "{regime}"%')
+        sql = (
+            "SELECT entry_ts, exit_ts, symbol, qty, entry_price, exit_price, "
+            "pnl_pct, pnl_usd, pnl_bucket, exit_reason, entry_thesis "
+            "FROM round_trips"
+        )
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY exit_ts DESC LIMIT ?"
+        params.append(int(limit))
+        cur = conn.execute(sql, params)
+        rows = cur.fetchall()
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        conn.close()
+    out: list[JournalRow] = []
+    for row in rows:
+        try:
+            entry_ts = datetime.fromisoformat(row[0])
+            exit_ts = datetime.fromisoformat(row[1])
+        except (TypeError, ValueError):
+            continue
+        out.append(
+            JournalRow(
+                entry_ts=entry_ts,
+                exit_ts=exit_ts,
+                symbol=row[2],
+                qty=row[3],
+                entry_price=row[4],
+                exit_price=row[5],
+                pnl_pct=row[6],
+                pnl_usd=row[7],
+                pnl_bucket=row[8],
+                exit_reason=row[9],
+                thesis=row[10],
+            )
+        )
+    return out
+
+
 def reconcile_now(log_dir: Path) -> int:
     """One-shot: rebuild round-trips from the journal. Returns count of new round-trips."""
     journal = TradeLogger(log_dir=log_dir)

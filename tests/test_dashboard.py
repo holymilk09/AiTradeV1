@@ -202,6 +202,89 @@ def test_home_rejects_wrong_password(client) -> None:  # type: ignore[no-untyped
     assert r.status_code == 401
 
 
+def test_root_redirects_to_overview(client) -> None:  # type: ignore[no-untyped-def]
+    tc, _, _ = client
+    r = tc.get("/", auth=(_USER, _PASS), follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/overview"
+
+
+def test_overview_tab_renders(client) -> None:  # type: ignore[no-untyped-def]
+    tc, _, _ = client
+    r = tc.get("/overview", auth=(_USER, _PASS))
+    assert r.status_code == 200
+    body = r.text
+    assert "Overview" in body
+    assert "AAPL" in body
+    # Side nav contains links to every tab.
+    for href in ["/live", "/screener", "/strategies", "/history", "/logs", "/chat"]:
+        assert f'href="{href}"' in body
+
+
+def test_live_tab_renders_without_market_snapshot(client) -> None:  # type: ignore[no-untyped-def]
+    tc, _, _ = client
+    r = tc.get("/live", auth=(_USER, _PASS))
+    assert r.status_code == 200
+    # No market snapshot event seeded → falls back to empty-state message.
+    assert "No market snapshot yet" in r.text
+
+
+def test_strategies_tab_lists_registered(client) -> None:  # type: ignore[no-untyped-def]
+    tc, _, _ = client
+    r = tc.get("/strategies", auth=(_USER, _PASS))
+    assert r.status_code == 200
+    assert "sma_crossover" in r.text
+    assert "floor_trader" in r.text
+
+
+def test_screener_tab_renders(client) -> None:  # type: ignore[no-untyped-def]
+    tc, _, _ = client
+    r = tc.get("/screener", auth=(_USER, _PASS))
+    assert r.status_code == 200
+    assert "Discovery scan" in r.text
+
+
+def test_history_tab_filters_by_symbol(client) -> None:  # type: ignore[no-untyped-def]
+    tc, _, _ = client
+    # The seed uses AAPL — filter by it should render at least the WIN row.
+    r = tc.get("/history?symbol=AAPL", auth=(_USER, _PASS))
+    assert r.status_code == 200
+    assert "AAPL" in r.text
+    assert "WIN" in r.text
+    # Filter by a symbol that doesn't exist → empty state.
+    r = tc.get("/history?symbol=ZZZZ", auth=(_USER, _PASS))
+    assert "No round-trips matching" in r.text
+
+
+def test_logs_tab_lists_event_types(client) -> None:  # type: ignore[no-untyped-def]
+    tc, _, _ = client
+    r = tc.get("/logs", auth=(_USER, _PASS))
+    assert r.status_code == 200
+    # The seed includes a floor_trader_decision event.
+    assert "floor_trader_decision" in r.text
+
+
+def test_chat_tab_warns_when_api_key_missing(tmp_path: Path) -> None:
+    """Chat tab should render but disable input when ANTHROPIC_API_KEY is empty."""
+    settings = Settings(
+        alpaca_api_key=SecretStr("k"),
+        alpaca_secret_key=SecretStr("s"),
+        anthropic_api_key=SecretStr(""),  # missing
+        aitrade_dashboard_password=SecretStr(_PASS),
+        aitrade_data_dir=tmp_path / "data",
+        aitrade_log_dir=tmp_path / "logs",
+    )
+    settings.ensure_dirs()
+    app = build_app(settings=settings, broker_factory=lambda: None)
+    from aitrade.config import get_settings as _get
+
+    app.dependency_overrides[_get] = lambda: settings
+    tc = TestClient(app)
+    r = tc.get("/chat", auth=(_USER, _PASS))
+    assert r.status_code == 200
+    assert "ANTHROPIC_API_KEY missing" in r.text
+
+
 def test_status_api_returns_structured_json(client) -> None:  # type: ignore[no-untyped-def]
     tc, _, _ = client
     r = tc.get("/api/status", auth=(_USER, _PASS))

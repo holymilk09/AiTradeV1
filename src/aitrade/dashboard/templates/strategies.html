@@ -1,0 +1,70 @@
+{% extends "_layout.html" %}
+{% block content %}
+
+<h1>Strategies</h1>
+<p class="page-sub">Registered strategies and their realized round-trip performance.</p>
+
+<h2>Registered</h2>
+<div class="grid cols-3">
+  {% for name, desc in registered %}
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title">{{ name }}</div>
+        <span class="pill {{ 'info' if name in active_strategies else '' }}">
+          {{ 'active' if name in active_strategies else 'idle' }}
+        </span>
+      </div>
+      <div class="small muted">{{ desc }}</div>
+    </div>
+  {% endfor %}
+  <div class="card">
+    <div class="card-head">
+      <div class="card-title">floor_trader</div>
+      <span class="pill {{ 'info' if 'floor_trader' in active_strategies else '' }}">
+        {{ 'active' if 'floor_trader' in active_strategies else 'idle' }}
+      </span>
+    </div>
+    <div class="small muted">
+      Claude Opus picks 1 trade per cycle from the candidate board, with
+      bracket exits and dynamic ATR stops.
+    </div>
+  </div>
+</div>
+
+<h2>Realized performance · per strategy</h2>
+<div class="card tight">
+{% if stats %}
+  <table>
+    <thead><tr>
+      <th>Strategy</th>
+      <th class="right">Trades</th>
+      <th class="right">Wins</th>
+      <th class="right">Losses</th>
+      <th class="right">Win rate</th>
+      <th class="right">Total P&L</th>
+      <th class="right">Avg / trade</th>
+    </tr></thead>
+    <tbody>
+    {% for s in stats %}
+      <tr>
+        <td><strong>{{ s.strategy_id }}</strong></td>
+        <td class="right mono">{{ s.n_trades }}</td>
+        <td class="right green mono">{{ s.n_wins }}</td>
+        <td class="right red mono">{{ s.n_losses }}</td>
+        <td class="right mono">{{ "%.0f%%"|format(s.win_rate * 100) }}</td>
+        <td class="right mono {{ 'green' if s.total_pnl_usd > 0 else 'red' }}">
+          {{ s.total_pnl_usd | money }}
+        </td>
+        <td class="right mono {{ 'green' if s.avg_pnl_usd > 0 else 'red' }}">
+          {{ s.avg_pnl_usd | money }}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <div class="empty">No round-trips yet — once trades close, per-strategy stats appear here.</div>
+{% endif %}
+</div>
+
+{% endblock %}
