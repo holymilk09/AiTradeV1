@@ -2,29 +2,27 @@
 {% block content %}
 
 <h1>Chat</h1>
-<p class="page-sub">
-  Ask Claude about your account, positions, recent decisions, or strategy.
-  The bot's current state is sent as context with every message.
-</p>
+<p class="page-sub">▸ Talk to the bot · current state injected per turn</p>
 
 {% if not has_api_key %}
-  <div class="card" style="border-color: var(--amber); background: var(--amber-bg);">
-    <strong class="amber">ANTHROPIC_API_KEY missing.</strong>
-    <span class="small muted">Set it in <code>.env</code> to enable chat.</span>
+  <div class="cell amber" style="margin-bottom:14px;">
+    <strong class="amber">⚠ ANTHROPIC_API_KEY MISSING</strong>
+    <span class="small dim">— set it in <span class="cyan">.env</span> to enable chat</span>
   </div>
 {% endif %}
 
-<div class="card">
+<div class="cell">
   <div class="chat-thread" id="chat">
     {% if not history %}
-      <div class="empty">
-        Try: "How is my paper account doing?" · "What did the bot decide last cycle?" ·
-        "Why is the floor-trader passing on AAPL?"
+      <div class="empty" style="border:none;">
+        TRY: "HOW IS MY PAPER ACCOUNT DOING?" ·
+        "WHAT DID THE BOT DECIDE LAST CYCLE?" ·
+        "WHY IS THE FLOOR-TRADER PASSING ON AAPL?"
       </div>
     {% endif %}
     {% for m in history %}
       <div class="msg {{ m.role }}">
-        <div class="who">{{ m.role }}</div>
+        <div class="who">{{ m.role|upper }}</div>
         {{ m.content }}
       </div>
     {% endfor %}
@@ -33,23 +31,23 @@
   <form action="/chat" method="post" class="chat-input">
     <textarea
       name="message"
-      placeholder="Ask the bot anything…"
+      placeholder="ASK THE BOT ANYTHING…"
       {{ 'disabled' if not has_api_key else '' }}>{{ '' }}</textarea>
-    <button class="btn primary" type="submit" {{ 'disabled' if not has_api_key else '' }}>
-      Send
+    <button class="btn amber" type="submit" {{ 'disabled' if not has_api_key else '' }}>
+      ▸ SEND
     </button>
   </form>
 
   {% if history %}
     <form action="/chat/clear" method="post" style="margin-top:8px;">
-      <button class="btn sm" type="submit">Clear conversation</button>
+      <button class="btn sm" type="submit">CLEAR THREAD</button>
     </form>
   {% endif %}
 </div>
 
-<p class="muted xs" style="margin-top:14px;">
-  Each request sends: account summary, open positions, last 5 decisions, last 5 round-trips,
-  current market snapshot. Claude doesn't see prior chat turns unless you reference them.
+<p class="vmuted xs" style="margin-top:14px;">
+  ▸ EVERY TURN INJECTS: ACCOUNT · OPEN POSITIONS · LAST 5 DECISIONS ·
+  LAST 5 ROUND-TRIPS · CURRENT MARKET SNAPSHOT
 </p>
 
 <script>

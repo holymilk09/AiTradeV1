@@ -188,7 +188,8 @@ def test_home_renders_for_authenticated_caller(client) -> None:  # type: ignore[
     r = tc.get("/", auth=(_USER, _PASS))
     assert r.status_code == 200
     body = r.text
-    assert "aitrade" in body
+    # Brand mark in the top header strip.
+    assert "AITRADE" in body
     assert "AAPL" in body  # position symbol
     assert "WIN" in body  # round-trip pnl_bucket pill
     assert "+$3.30" in body  # round-trip realized pnl
@@ -225,16 +226,19 @@ def test_live_tab_renders_without_market_snapshot(client) -> None:  # type: igno
     tc, _, _ = client
     r = tc.get("/live", auth=(_USER, _PASS))
     assert r.status_code == 200
-    # No market snapshot event seeded → falls back to empty-state message.
-    assert "No market snapshot yet" in r.text
+    # No market snapshot event seeded → falls back to empty-state message
+    # (uppercased in the terminal aesthetic).
+    assert "NO MARKET SNAPSHOT YET" in r.text
 
 
 def test_strategies_tab_lists_registered(client) -> None:  # type: ignore[no-untyped-def]
     tc, _, _ = client
     r = tc.get("/strategies", auth=(_USER, _PASS))
     assert r.status_code == 200
-    assert "sma_crossover" in r.text
-    assert "floor_trader" in r.text
+    # The terminal layout uppercases the strategy names in tile headers.
+    body = r.text
+    assert "SMA_CROSSOVER" in body or "sma_crossover" in body
+    assert "FLOOR_TRADER" in body or "floor_trader" in body
 
 
 def test_screener_tab_renders(client) -> None:  # type: ignore[no-untyped-def]
@@ -253,7 +257,7 @@ def test_history_tab_filters_by_symbol(client) -> None:  # type: ignore[no-untyp
     assert "WIN" in r.text
     # Filter by a symbol that doesn't exist → empty state.
     r = tc.get("/history?symbol=ZZZZ", auth=(_USER, _PASS))
-    assert "No round-trips matching" in r.text
+    assert "NO ROUND-TRIPS MATCHING" in r.text
 
 
 def test_logs_tab_lists_event_types(client) -> None:  # type: ignore[no-untyped-def]
@@ -282,7 +286,7 @@ def test_chat_tab_warns_when_api_key_missing(tmp_path: Path) -> None:
     tc = TestClient(app)
     r = tc.get("/chat", auth=(_USER, _PASS))
     assert r.status_code == 200
-    assert "ANTHROPIC_API_KEY missing" in r.text
+    assert "ANTHROPIC_API_KEY MISSING" in r.text
 
 
 def test_status_api_returns_structured_json(client) -> None:  # type: ignore[no-untyped-def]

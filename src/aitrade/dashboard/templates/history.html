@@ -2,77 +2,77 @@
 {% block content %}
 
 <h1>History</h1>
-<p class="page-sub">All closed round-trips, with filters. Newest first.</p>
+<p class="page-sub">▸ All closed round-trips · newest first · filterable</p>
 
 <form class="filters" method="get" action="/history">
-  <input type="text" name="symbol" placeholder="Symbol (e.g. AAPL)" value="{{ filters.symbol or '' }}">
-  <input type="text" name="pattern" placeholder="Pattern (e.g. breakout)" value="{{ filters.pattern or '' }}">
+  <input type="text" name="symbol" placeholder="SYMBOL (E.G. AAPL)" value="{{ filters.symbol or '' }}">
+  <input type="text" name="pattern" placeholder="PATTERN (E.G. BREAKOUT)" value="{{ filters.pattern or '' }}">
   <select name="bucket">
-    <option value="">All outcomes</option>
-    <option value="WIN" {{ 'selected' if filters.bucket == 'WIN' else '' }}>Win only</option>
-    <option value="LOSS" {{ 'selected' if filters.bucket == 'LOSS' else '' }}>Loss only</option>
-    <option value="BREAKEVEN" {{ 'selected' if filters.bucket == 'BREAKEVEN' else '' }}>Breakeven</option>
+    <option value="">ALL OUTCOMES</option>
+    <option value="WIN" {{ 'selected' if filters.bucket == 'WIN' else '' }}>WIN ONLY</option>
+    <option value="LOSS" {{ 'selected' if filters.bucket == 'LOSS' else '' }}>LOSS ONLY</option>
+    <option value="BREAKEVEN" {{ 'selected' if filters.bucket == 'BREAKEVEN' else '' }}>BREAKEVEN</option>
   </select>
   <select name="regime">
-    <option value="">All regimes</option>
+    <option value="">ALL REGIMES</option>
     {% for r in known_regimes %}
-      <option value="{{ r }}" {{ 'selected' if filters.regime == r else '' }}>{{ r }}</option>
+      <option value="{{ r }}" {{ 'selected' if filters.regime == r else '' }}>{{ r|upper }}</option>
     {% endfor %}
   </select>
-  <button class="btn primary sm" type="submit">Apply</button>
-  <a class="btn sm" href="/history">Clear</a>
+  <button class="btn amber sm" type="submit">▸ APPLY</button>
+  <a class="btn sm" href="/history">CLEAR</a>
 </form>
 
-<div class="card tight">
+<div class="cell tight">
 {% if rows %}
   <table>
     <thead><tr>
-      <th>Symbol</th><th>Entry → Exit</th>
-      <th class="right">Qty</th>
-      <th class="right">Entry / Exit</th>
+      <th>SYM</th>
+      <th>WHEN</th>
+      <th class="right">QTY</th>
+      <th class="right">ENTRY / EXIT</th>
       <th class="right">P&L</th>
       <th class="right">%</th>
-      <th>Outcome</th>
-      <th>Exit</th>
-      <th>Thesis</th>
+      <th>OUT</th>
+      <th>EXIT</th>
+      <th>THESIS</th>
     </tr></thead>
     <tbody>
     {% for r in rows %}
       <tr>
-        <td><strong>{{ r.symbol }}</strong></td>
-        <td class="small muted">
+        <td class="amber"><strong>{{ r.symbol }}</strong></td>
+        <td class="dim small">
           {{ r.entry_ts.strftime('%m/%d %H:%M') }}
           → {{ r.exit_ts.strftime('%H:%M') }}
         </td>
-        <td class="right mono">{{ "%.0f"|format(r.qty) }}</td>
-        <td class="right small mono">
+        <td class="right num">{{ "%.0f"|format(r.qty) }}</td>
+        <td class="right num small">
           {{ "%.2f"|format(r.entry_price) }} / {{ "%.2f"|format(r.exit_price) }}
         </td>
-        <td class="right mono {{ 'green' if r.pnl_usd > 0 else 'red' }}">
+        <td class="right num {{ 'green' if r.pnl_usd > 0 else 'red' }}">
           {{ r.pnl_usd | money }}
         </td>
-        <td class="right mono {{ 'green' if r.pnl_pct > 0 else 'red' }}">
+        <td class="right num {{ 'green' if r.pnl_pct > 0 else 'red' }}">
           {{ r.pnl_pct | pct }}
         </td>
         <td>
-          <span class="pill {{ 'ok' if r.pnl_bucket == 'WIN' else ('warn' if r.pnl_bucket == 'BREAKEVEN' else '') }}"
-                style="{{ 'color:#fca5a5;background:rgba(239,68,68,0.12);border-color:#5a2828;' if r.pnl_bucket == 'LOSS' else '' }}">
+          <span class="tag {{ 'green' if r.pnl_bucket == 'WIN' else ('red' if r.pnl_bucket == 'LOSS' else '') }}">
             {{ r.pnl_bucket }}
           </span>
         </td>
-        <td><span class="pill xs">{{ r.exit_reason }}</span></td>
-        <td class="small muted" style="max-width:280px;">{{ (r.thesis or '—') | truncate(80) }}</td>
+        <td><span class="tag xs">{{ r.exit_reason }}</span></td>
+        <td class="small dim" style="max-width:280px;">{{ (r.thesis or '—') | truncate(80) }}</td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
 {% else %}
-  <div class="empty">No round-trips matching these filters.</div>
+  <div class="empty">NO ROUND-TRIPS MATCHING THESE FILTERS</div>
 {% endif %}
 </div>
 
-<p class="muted xs" style="margin-top:10px;">
-  Showing {{ rows|length }} of up to {{ limit }} matching rows.
+<p class="vmuted xs" style="margin-top:8px;">
+  ▸ SHOWING {{ rows|length }} OF UP TO {{ limit }} ROWS
 </p>
 
 {% endblock %}

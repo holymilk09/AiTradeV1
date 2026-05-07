@@ -2,34 +2,35 @@
 {% block content %}
 
 <h1>Logs</h1>
-<p class="page-sub">
-  Raw event timeline from the trade journal. Filter by event type to drill in.
-</p>
+<p class="page-sub">▸ Raw event timeline · filter by event type</p>
 
 <form class="filters" method="get" action="/logs">
   <select name="event_type">
-    <option value="">All event types</option>
+    <option value="">ALL EVENT TYPES</option>
     {% for t in event_types %}
       <option value="{{ t }}" {{ 'selected' if filter_type == t else '' }}>{{ t }}</option>
     {% endfor %}
   </select>
-  <button class="btn primary sm" type="submit">Apply</button>
-  <a class="btn sm" href="/logs">Clear</a>
+  <button class="btn amber sm" type="submit">▸ APPLY</button>
+  <a class="btn sm" href="/logs">CLEAR</a>
 </form>
 
-<div class="card tight">
+<div class="cell tight">
 {% if events %}
   <table>
     <thead><tr>
-      <th>When</th><th>Event</th><th>Symbol</th><th>Payload (preview)</th>
+      <th>WHEN</th>
+      <th>EVENT</th>
+      <th>SYM</th>
+      <th>PAYLOAD</th>
     </tr></thead>
     <tbody>
     {% for ev in events %}
       <tr>
-        <td class="small muted mono">{{ ev.timestamp.strftime('%m/%d %H:%M:%S') }}</td>
-        <td><span class="pill {{ event_pill_class(ev.event_type) }}">{{ ev.event_type }}</span></td>
-        <td><strong>{{ ev.symbol }}</strong></td>
-        <td class="xs muted mono" style="max-width:600px; word-break:break-all;">
+        <td class="dim small num">{{ ev.timestamp.strftime('%m/%d %H:%M:%S') }}</td>
+        <td><span class="tag {{ event_pill_class(ev.event_type) }}">{{ ev.event_type }}</span></td>
+        <td class="amber"><strong>{{ ev.symbol }}</strong></td>
+        <td class="xs dim" style="max-width:600px; word-break:break-all;">
           {{ payload_preview(ev.payload) }}
         </td>
       </tr>
@@ -37,12 +38,12 @@
     </tbody>
   </table>
 {% else %}
-  <div class="empty">No events {{ '(matching filter)' if filter_type else 'yet' }}.</div>
+  <div class="empty">NO EVENTS {{ '(MATCHING FILTER)' if filter_type else 'YET' }}</div>
 {% endif %}
 </div>
 
-<p class="muted xs" style="margin-top:10px;">
-  Showing {{ events|length }} of up to {{ limit }} events.
+<p class="vmuted xs" style="margin-top:8px;">
+  ▸ SHOWING {{ events|length }} OF UP TO {{ limit }} EVENTS
 </p>
 
 {% endblock %}
