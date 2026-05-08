@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from aitrade.discovery.scorer import DiscoveredTicker
 from aitrade.patterns.base import PatternSignal
 from aitrade.patterns.board import build_board
@@ -171,3 +173,44 @@ def test_trend_evidence_components_serialized() -> None:
     assert "raw_trend" in cand.evidence
     assert cand.evidence["trend_components"] == {"ma_stack": 0.75, "higher_highs_lows": 0.75}
     assert cand.evidence["trend_is_strong"] is True
+
+
+# ----- Phase 8 — correlation_penalty in combined_score ---------------------
+
+
+def test_correlation_penalty_demotes_stacked_candidate() -> None:
+    """Two candidates with identical raw scores; the one whose return
+    series is highly correlated with a held position gets penalized
+    and ranks below the uncorrelated peer."""
+    discovered = [_ticker("STACKED", buzz=1.0), _ticker("FRESH", buzz=1.0)]
+    patterns = {
+        "STACKED": [_signal("STACKED", "breakout", 0.5)],
+        "FRESH":   [_signal("FRESH",   "breakout", 0.5)],
+    }
+    penalty_map = {"STACKED": -0.5}  # caller computed this from corr matrix
+    board = build_board(
+        discovered,
+        patterns,
+        correlation_penalty_by_symbol=penalty_map,
+    )
+    syms = [c.symbol for c in board.candidates]
+    assert syms == ["FRESH", "STACKED"]
+    stacked = next(c for c in board.candidates if c.symbol == "STACKED")
+    fresh = next(c for c in board.candidates if c.symbol == "FRESH")
+    assert stacked.correlation_penalty == -0.5
+    assert fresh.correlation_penalty == 0.0
+    # Combined score must reflect the penalty.
+    assert fresh.combined_score - stacked.combined_score == pytest.approx(0.5)
+    # Penalty surfaces in evidence too — for the floor-trader prompt.
+    assert stacked.evidence["correlation_penalty"] == -0.5
+    assert "correlation_penalty" not in fresh.evidence
+
+
+def test_correlation_penalty_serialized_in_to_dict() -> None:
+    discovered = [_ticker("AAA", buzz=1.0)]
+    patterns = {"AAA": [_signal("AAA", "breakout", 0.5)]}
+    board = build_board(
+        discovered, patterns, correlation_penalty_by_symbol={"AAA": -0.25}
+    )
+    out = board.candidates[0].to_dict()
+    assert out["correlation_penalty"] == -0.25

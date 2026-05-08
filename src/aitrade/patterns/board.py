@@ -52,6 +52,7 @@ class Candidate:
     position_fit_bonus: float
     trend_score: float = 0.0
     trend_direction: Direction = Direction.FLAT
+    correlation_penalty: float = 0.0
     pattern_hits: list[str] = field(default_factory=list)
     evidence: dict[str, Any] = field(default_factory=dict)
     discovered_at: datetime | None = None
@@ -66,6 +67,7 @@ class Candidate:
             "trend_direction": self.trend_direction.value,
             "combined_score": round(self.combined_score, 4),
             "position_fit_bonus": round(self.position_fit_bonus, 4),
+            "correlation_penalty": round(self.correlation_penalty, 4),
             "pattern_hits": list(self.pattern_hits),
             "evidence": dict(self.evidence),
             "discovered_at": self.discovered_at.isoformat() if self.discovered_at else None,
@@ -136,6 +138,7 @@ def build_board(
     patterns_by_symbol: dict[str, list[PatternSignal]],
     *,
     trend_by_symbol: dict[str, TrendScore] | None = None,
+    correlation_penalty_by_symbol: dict[str, float] | None = None,
     held_qty_by_symbol: dict[str, float] | None = None,
     last_price_by_symbol: dict[str, float] | None = None,
     cash_available: float = 0.0,
@@ -151,6 +154,7 @@ def build_board(
     held_qty_by_symbol = held_qty_by_symbol or {}
     last_price_by_symbol = last_price_by_symbol or {}
     trend_by_symbol = trend_by_symbol or {}
+    correlation_penalty_by_symbol = correlation_penalty_by_symbol or {}
     now = now or datetime.now(UTC)
 
     # Union of every symbol that surfaced in any of the three lanes.
@@ -188,7 +192,8 @@ def build_board(
             cash_available=cash_available,
             target_notional=target_notional,
         )
-        combined = buzz_z[i] + pat_z[i] + trend_z[i] + 0.5 * fit
+        corr_penalty = correlation_penalty_by_symbol.get(sym, 0.0)
+        combined = buzz_z[i] + pat_z[i] + trend_z[i] + 0.5 * fit + corr_penalty
         evidence: dict[str, Any] = {
             "buzz_z": round(buzz_z[i], 4),
             "pattern_z": round(pat_z[i], 4),
@@ -197,6 +202,8 @@ def build_board(
             "raw_pattern": round(pat, 4),
             "raw_trend": round(tr_score, 4),
         }
+        if corr_penalty != 0.0:
+            evidence["correlation_penalty"] = round(corr_penalty, 4)
         if sym in by_buzz:
             t = by_buzz[sym]
             evidence["mention_count"] = t.mention_count
@@ -224,6 +231,7 @@ def build_board(
                 position_fit_bonus=fit,
                 trend_score=tr_score,
                 trend_direction=trend.direction if trend is not None else Direction.FLAT,
+                correlation_penalty=corr_penalty,
                 pattern_hits=[s.name for s in signals],
                 evidence=evidence,
                 discovered_at=by_buzz[sym].discovered_at if sym in by_buzz else None,

@@ -494,6 +494,22 @@ def fetch_latest_market_snapshot(log_dir: Path) -> dict[str, Any] | None:
     return events[0].payload
 
 
+def fetch_latest_correlation_matrix(
+    log_dir: Path,
+) -> tuple[datetime | None, dict[str, Any] | None]:
+    """Most-recent CORRELATION_MATRIX event ``(built_at, payload)``.
+
+    Returns ``(None, None)`` when no matrix has been journaled yet —
+    the dashboard's correlations tab uses that as the empty-state signal.
+    """
+    events = fetch_recent_events(
+        log_dir, event_type="correlation_matrix", limit=1
+    )
+    if not events:
+        return None, None
+    return events[0].timestamp, events[0].payload
+
+
 def fetch_filtered_round_trips(
     log_dir: Path,
     *,

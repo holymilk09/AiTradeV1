@@ -35,6 +35,7 @@ class EventType(str, Enum):
     DEEP_DIG = "deep_dig"
     STOP_PLAN = "stop_plan"
     TIME_GATED_SKIP = "time_gated_skip"
+    CORRELATION_MATRIX = "correlation_matrix"
     ROUND_TRIP_CLOSED = "round_trip_closed"
     STALE_DATA_SKIP = "stale_data_skip"
     EMPTY_DISCOVERY = "empty_discovery"

@@ -268,6 +268,16 @@ def test_logs_tab_lists_event_types(client) -> None:  # type: ignore[no-untyped-
     assert "floor_trader_decision" in r.text
 
 
+def test_correlations_tab_empty_state(client) -> None:  # type: ignore[no-untyped-def]
+    """No CORRELATION_MATRIX event seeded → empty-state message renders."""
+    tc, _, _ = client
+    r = tc.get("/correlations", auth=(_USER, _PASS))
+    assert r.status_code == 200
+    assert "NO CORRELATION MATRIX YET" in r.text
+    # Side-nav link must be present.
+    assert 'href="/correlations"' in r.text
+
+
 def test_chat_tab_warns_when_api_key_missing(tmp_path: Path) -> None:
     """Chat tab should render but disable input when ANTHROPIC_API_KEY is empty."""
     settings = Settings(

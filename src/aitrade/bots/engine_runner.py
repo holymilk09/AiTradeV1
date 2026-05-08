@@ -55,6 +55,11 @@ from aitrade.journal.narratives import NarrativeGenerator
 from aitrade.journal.round_trips import RoundTripReconciler, TradeRoundTrip
 from aitrade.journal.similarity import SimilarityQuery, SimilarTradesFinder
 from aitrade.logging.trade_logger import EventType, TradeLogger
+from aitrade.market.correlations import (
+    closes_to_log_returns,
+    compute_correlation_matrix,
+    correlation_penalty_for,
+)
 from aitrade.market.freshness import StaleDataError, assert_bars_fresh
 from aitrade.market.snapshot import MarketSnapshotFetcher, is_in_volatile_open_close
 from aitrade.news.client import AlpacaNewsClient
@@ -617,6 +622,9 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
     last_price_by_symbol: dict[str, float] = {}
     daily_atr_by_symbol: dict[str, float] = {}
     multi_tf_dumps: dict[str, dict[str, Any]] = {}
+    # Phase 8: capture daily-close vectors so we can compute pairwise
+    # correlations + penalties before building the board.
+    daily_closes_by_symbol: dict[str, list[float]] = {}
 
     for ticker in discovered:
         sym = ticker.symbol
@@ -633,6 +641,9 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
         if not daily_bars:
             continue
         last_price_by_symbol[sym] = daily_bars[-1].close
+        # Last 60 daily closes are plenty for the correlation window;
+        # capping bounds the per-cycle compute regardless of scan depth.
+        daily_closes_by_symbol[sym] = [b.close for b in daily_bars[-60:]]
 
         try:
             mtf = compute_multi_tf_snapshot(bars_by_tf)
@@ -688,10 +699,53 @@ def _run_one_cycle(  # noqa: PLR0913 — orchestration glue, intentional fan-in
         for p in positions
     }
 
+    # Phase 8: pairwise correlation matrix (candidates ∪ held positions).
+    # Held symbols whose daily bars weren't already pulled get fetched
+    # opportunistically — usually they overlap with candidates anyway.
+    held_symbols_needing_bars = [
+        p.symbol for p in positions if p.symbol not in daily_closes_by_symbol
+    ]
+    for h_sym in held_symbols_needing_bars:
+        try:
+            bars_by_tf = _fetch_multi_tf_bars(data, h_sym)
+        except Exception as e:  # pragma: no cover — defensive
+            logger.warning("correlation: bar fetch failed for held {}: {}", h_sym, e)
+            continue
+        h_daily = bars_by_tf.get(Timeframe.DAY_1, [])
+        if h_daily:
+            daily_closes_by_symbol[h_sym] = [b.close for b in h_daily[-60:]]
+
+    returns_by_symbol = {
+        sym: closes_to_log_returns(closes)
+        for sym, closes in daily_closes_by_symbol.items()
+    }
+    correlation_matrix = compute_correlation_matrix(returns_by_symbol)
+    held_with_returns = [
+        p.symbol for p in positions if p.symbol in returns_by_symbol
+    ]
+    correlation_penalty_by_symbol: dict[str, float] = {}
+    if held_with_returns:
+        for cand_sym in returns_by_symbol:
+            penalty = correlation_penalty_for(
+                correlation_matrix, cand_sym, held_with_returns
+            )
+            if penalty != 0.0:
+                correlation_penalty_by_symbol[cand_sym] = penalty
+    if correlation_matrix.symbols:
+        journal.record(
+            EventType.CORRELATION_MATRIX,
+            symbol="-",
+            payload={
+                **correlation_matrix.to_journal_payload(),
+                "held_positions": held_with_returns,
+            },
+        )
+
     board = build_board(
         discovered,
         patterns_by_symbol,
         trend_by_symbol=trend_by_symbol,
+        correlation_penalty_by_symbol=correlation_penalty_by_symbol,
         held_qty_by_symbol=held_qty_by_symbol,
         last_price_by_symbol=last_price_by_symbol,
         cash_available=account.cash,

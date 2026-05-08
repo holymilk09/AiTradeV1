@@ -55,6 +55,7 @@ _EVENT_PILL_CLASS = {
     "time_gated_skip": "warn",
     "deep_dig": "info",
     "stop_plan": "info",
+    "correlation_matrix": "cyan",
     "floor_trader_decision": "info",
     "candidate_board": "",
     "market_snapshot": "",
@@ -75,6 +76,35 @@ def _payload_preview(payload: dict[str, Any], *, max_len: int = 220) -> str:
     if len(text) > max_len:
         return text[:max_len] + "…"
     return text
+
+
+def _rho_color(rho: float | None) -> str:
+    """Diverging-palette background for a correlation heatmap cell.
+
+    Blue for positive, red for negative, near-transparent for near-zero,
+    deep dark blue for the diagonal (rho == 1.0).
+    """
+    if rho is None:
+        return "var(--bg-cell)"
+    if rho >= 0.999:
+        return "rgba(0, 217, 255, 0.55)"  # diagonal — distinctly cyan
+    intensity = min(abs(rho), 1.0)
+    if rho >= 0:
+        return f"rgba(0, 217, 255, {intensity * 0.45:.3f})"
+    return f"rgba(255, 47, 60, {intensity * 0.45:.3f})"
+
+
+def _rho_text_color(rho: float | None) -> str:
+    """Text color that stays readable across the cell's bg intensity."""
+    if rho is None:
+        return "var(--text-muted)"
+    if abs(rho) > 0.6:
+        return "var(--text)"
+    if rho > 0:
+        return "var(--cyan)"
+    if rho < 0:
+        return "var(--red)"
+    return "var(--text-dim)"
 
 
 def build_app(*, settings: Settings | None = None, broker_factory: Any = None) -> FastAPI:
@@ -281,6 +311,68 @@ def build_app(*, settings: Settings | None = None, broker_factory: Any = None) -
                 },
                 "known_regimes": known_regimes,
                 "limit": 200,
+            },
+        )
+
+    # ----- Correlations (Phase 8) -------------------------------------------
+
+    @app.get("/correlations", response_class=HTMLResponse)
+    def correlations(
+        request: Request,
+        _user: str = Depends(require_auth),
+    ) -> Response:
+        built_at, payload = dash.fetch_latest_correlation_matrix(s.aitrade_log_dir)
+        symbols: list[str] = []
+        held: set[str] = set()
+        pair_lookup: dict[tuple[str, str], float] = {}
+        hot_pairs: list[tuple[str, str, float]] = []
+        insufficient: list[tuple[str, str]] = []
+        if payload:
+            symbols = list(payload.get("symbols") or [])
+            held = set(payload.get("held_positions") or [])
+            for entry in payload.get("pairs") or []:
+                if not isinstance(entry, dict):
+                    continue
+                a = str(entry.get("a"))
+                b = str(entry.get("b"))
+                rho_raw = entry.get("rho")
+                if rho_raw is None:
+                    continue
+                try:
+                    rho = float(rho_raw)
+                except (TypeError, ValueError):
+                    continue
+                key = (a, b) if a < b else (b, a)
+                pair_lookup[key] = rho
+                if abs(rho) > 0.7:
+                    hot_pairs.append((a, b, rho))
+            hot_pairs.sort(key=lambda r: -abs(r[2]))
+            for entry in payload.get("insufficient_pairs") or []:
+                if not isinstance(entry, dict):
+                    continue
+                insufficient.append((str(entry.get("a")), str(entry.get("b"))))
+
+        def _matrix_get(a: str, b: str) -> float | None:
+            if a == b:
+                return 1.0
+            key = (a, b) if a < b else (b, a)
+            return pair_lookup.get(key)
+
+        return templates.TemplateResponse(
+            request,
+            "correlations.html",
+            {
+                "active_tab": "correlations",
+                **_shared_context(),
+                "built_at": built_at,
+                "payload": payload,
+                "symbols": symbols,
+                "held": held,
+                "hot_pairs": hot_pairs,
+                "insufficient": insufficient,
+                "matrix_get": _matrix_get,
+                "rho_color": _rho_color,
+                "rho_text_color": _rho_text_color,
             },
         )
 
