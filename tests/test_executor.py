@@ -108,3 +108,73 @@ def test_non_halted_symbol_still_reaches_broker() -> None:
     result = exe.submit(order, reference_price=100.0)
     assert result.accepted
     assert len(broker.calls) == 1
+
+
+@dataclass
+class CountingBroker(FakeBroker):
+    """Tracks how many times is_tradable was called per symbol."""
+
+    is_tradable_calls: dict[str, int] = field(default_factory=dict)
+
+    def is_tradable(self, symbol: str) -> bool:
+        self.is_tradable_calls[symbol] = self.is_tradable_calls.get(symbol, 0) + 1
+        return super().is_tradable(symbol)
+
+
+def test_tradability_blacklist_stops_spam() -> None:
+    """A symbol that returns not-tradable repeatedly is blacklisted so the
+    paper runner can't accidentally hammer the broker every poll cycle."""
+    broker = CountingBroker(halted_symbols={"AAPL"})
+    exe = Executor(broker, _gate())
+    order = OrderRequest(symbol="AAPL", side=Side.BUY, qty=10)
+
+    # First 3 calls hit the broker and get rejected. The 3rd blacklists.
+    for _ in range(3):
+        result = exe.submit(order, reference_price=100.0)
+        assert not result.accepted
+        assert "not tradable" in result.reason
+
+    # 10 more submits — none should call the broker again.
+    for _ in range(10):
+        result = exe.submit(order, reference_price=100.0)
+        assert not result.accepted
+        assert "blacklisted" in result.reason
+
+    assert broker.is_tradable_calls["AAPL"] == 3
+    assert not broker.calls
+
+
+def test_transient_not_tradable_doesnt_blacklist() -> None:
+    """One-off false negative should reset on the next successful tradable check."""
+    broker = CountingBroker(halted_symbols={"AAPL"})
+    exe = Executor(broker, _gate())
+    order = OrderRequest(symbol="AAPL", side=Side.BUY, qty=10)
+
+    # First reject (count = 1)
+    result = exe.submit(order, reference_price=100.0)
+    assert not result.accepted
+
+    # Symbol becomes tradable again
+    broker.halted_symbols.clear()
+    result = exe.submit(order, reference_price=100.0)
+    assert result.accepted
+
+    # Reset the broker to halt again — counter starts fresh, no immediate blacklist.
+    broker.halted_symbols.add("AAPL")
+    result = exe.submit(order, reference_price=100.0)
+    assert not result.accepted
+    assert "not tradable" in result.reason
+    assert "blacklisted" not in result.reason
+
+
+def test_reset_tradability_cache_lifts_blacklist() -> None:
+    broker = CountingBroker(halted_symbols={"AAPL"})
+    exe = Executor(broker, _gate())
+    order = OrderRequest(symbol="AAPL", side=Side.BUY, qty=10)
+    for _ in range(3):
+        exe.submit(order, reference_price=100.0)
+    # Now blacklisted; clear it and confirm the broker is called again.
+    broker.halted_symbols.clear()
+    exe.reset_tradability_cache()
+    result = exe.submit(order, reference_price=100.0)
+    assert result.accepted

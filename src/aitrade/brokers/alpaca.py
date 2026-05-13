@@ -85,9 +85,11 @@ class AlpacaBroker(BrokerClient):
             )
             return False
         tradable = bool(getattr(asset, "tradable", False))
-        status = str(getattr(asset, "status", "")).lower()
-        # Alpaca's status enum is "active" / "inactive". Any non-active means
-        # delisted, suspended, or otherwise unsafe to send to.
+        raw_status = getattr(asset, "status", "")
+        # Alpaca's AssetStatus is an Enum whose .value is "active" / "inactive".
+        # Plain str() yields "AssetStatus.ACTIVE", which would silently fail
+        # the equality check below for every real symbol — that was the bug.
+        status = str(getattr(raw_status, "value", raw_status)).lower()
         return tradable and status == "active"
 
     def submit_order(self, order: OrderRequest) -> OrderAck:

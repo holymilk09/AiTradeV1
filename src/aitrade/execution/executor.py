@@ -10,6 +10,12 @@ from aitrade.brokers.base import BrokerClient
 from aitrade.execution.orders import OrderAck, OrderRequest
 from aitrade.execution.risk import RiskGate
 
+# After this many consecutive "not tradable" returns for the same symbol,
+# stop calling the broker for that symbol until the executor is reset.
+# Prevents a paper runner from spamming the journal + the broker once a
+# symbol has been firmly classified as non-tradable.
+_TRADABILITY_BLACKLIST_AFTER = 3
+
 
 @dataclass(frozen=True, slots=True)
 class SubmitResult:
@@ -22,10 +28,21 @@ class Executor:
     def __init__(self, broker: BrokerClient, risk: RiskGate) -> None:
         self._broker = broker
         self._risk = risk
+        self._not_tradable_counts: dict[str, int] = {}
+        self._blacklist: set[str] = set()
 
     @property
     def risk(self) -> RiskGate:
         return self._risk
+
+    def reset_tradability_cache(self) -> None:
+        """Clear the per-symbol non-tradable counter + blacklist.
+
+        Call at the start of a new session or when an operator has confirmed
+        a halt has lifted. Not called automatically.
+        """
+        self._not_tradable_counts.clear()
+        self._blacklist.clear()
 
     def submit(
         self,
@@ -34,6 +51,15 @@ class Executor:
         reference_price: float,
         current_position_qty: float = 0.0,
     ) -> SubmitResult:
+        # Short-circuit: a symbol already classified as non-tradable stays
+        # blocked for the rest of the session.
+        if order.symbol in self._blacklist:
+            reason = (
+                f"symbol {order.symbol} blacklisted after "
+                f"{_TRADABILITY_BLACKLIST_AFTER} not-tradable returns"
+            )
+            return SubmitResult(False, reason)
+
         # Halt / delisting check before risk gate. Cheap (one cached
         # asset lookup) and short-circuits sending to a halted ticker —
         # which Alpaca would reject with a confusing error after the
@@ -48,9 +74,29 @@ class Executor:
             )
             tradable = False
         if not tradable:
+            count = self._not_tradable_counts.get(order.symbol, 0) + 1
+            self._not_tradable_counts[order.symbol] = count
             reason = f"symbol {order.symbol} not tradable (halted/delisted)"
-            logger.warning("order blocked: {}", reason)
+            if count >= _TRADABILITY_BLACKLIST_AFTER:
+                self._blacklist.add(order.symbol)
+                logger.warning(
+                    "order blocked: {} (blacklisted after {} rejects; "
+                    "call executor.reset_tradability_cache() to retry)",
+                    reason,
+                    count,
+                )
+            else:
+                logger.warning(
+                    "order blocked: {} (reject {}/{})",
+                    reason,
+                    count,
+                    _TRADABILITY_BLACKLIST_AFTER,
+                )
             return SubmitResult(False, reason)
+
+        # Symbol came back tradable — reset its counter so a transient false
+        # negative doesn't accumulate over hours.
+        self._not_tradable_counts.pop(order.symbol, None)
 
         decision = self._risk.check(
             order,
