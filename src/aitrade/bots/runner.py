@@ -27,6 +27,15 @@ from aitrade.strategy.base import Strategy
 from aitrade.strategy.signal import Direction, size_by_notional
 
 
+def _safe_get_positions(broker: BrokerClient) -> list:
+    """get_positions over a flaky network — return [] on failure, never raise."""
+    try:
+        return broker.get_positions()
+    except Exception as exc:
+        logger.warning("get_positions failed err={}; treating as flat", exc)
+        return []
+
+
 @dataclass
 class PaperRunConfig:
     symbol: str
@@ -63,9 +72,22 @@ def run_paper_session(
     warmed = False
     while datetime.now(UTC) < end_at:
         start = datetime.now(UTC) - timedelta(days=5)
-        df = data.fetch_stock_bars(
-            cfg.symbol, cfg.timeframe, start=start, end=datetime.now(UTC), use_cache=False
-        )
+        try:
+            df = data.fetch_stock_bars(
+                cfg.symbol, cfg.timeframe, start=start, end=datetime.now(UTC), use_cache=False
+            )
+        except Exception as exc:
+            # Network blips, transient 5xx, RemoteDisconnected — never let one
+            # bad fetch kill an 8h paper session. Log, back off, retry on the
+            # next poll cycle.
+            logger.warning(
+                "fetch_stock_bars failed symbol={} err={}; backing off {}s",
+                cfg.symbol,
+                exc,
+                cfg.poll_interval_secs,
+            )
+            time.sleep(cfg.poll_interval_secs)
+            continue
         if df.empty:
             logger.warning("no bars yet for {}", cfg.symbol)
             time.sleep(cfg.poll_interval_secs)
@@ -95,7 +117,7 @@ def run_paper_session(
                     bar.timestamp.isoformat(),
                 )
 
-            positions = {p.symbol: p.qty for p in broker.get_positions()}
+            positions = {p.symbol: p.qty for p in _safe_get_positions(broker)}
             held = positions.get(cfg.symbol, 0.0)
 
             if signal.direction is Direction.LONG:

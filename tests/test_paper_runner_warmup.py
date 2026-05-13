@@ -114,3 +114,74 @@ def test_warmup_blocks_historical_signals_from_submitting() -> None:
 
     # All 60 bars predate session_start → no orders should have been submitted.
     assert broker.submitted == []
+
+
+def test_fetch_failure_does_not_crash_session() -> None:
+    """A RemoteDisconnected (or any exception) from fetch_stock_bars must
+    NOT propagate out of run_paper_session. The loop should log and continue."""
+    broker = FakeBroker()
+    data = MagicMock()
+    data.fetch_stock_bars.side_effect = ConnectionError(
+        "Connection aborted., RemoteDisconnected"
+    )
+
+    risk = RiskGate(
+        max_position_usd=1_000_000,
+        max_daily_loss_usd=1_000_000,
+        max_orders_per_min=999,
+    )
+    exe = Executor(broker, risk)
+    journal = MagicMock()
+    journal.run_id = "test"
+
+    from aitrade.strategy.examples.sma_crossover import SmaCrossover
+
+    strat = SmaCrossover(symbol="AAPL", fast=5, slow=20)
+    cfg = PaperRunConfig(
+        symbol="AAPL",
+        timeframe=Timeframe.MIN_1,
+        duration=timedelta(seconds=0),
+        poll_interval_secs=0,  # don't actually sleep in tests
+        target_position_notional=2_000.0,
+    )
+    # Must return normally — not raise.
+    run_paper_session(strat, broker, data, exe, journal, cfg)
+    assert broker.submitted == []
+
+
+def test_get_positions_failure_does_not_crash_session() -> None:
+    """broker.get_positions raising mid-loop must not propagate."""
+    live_start = datetime.now(UTC) - timedelta(minutes=2)
+    df = _bars_df(live_start, n=60)
+
+    broker = FakeBroker()
+    # Make every get_positions raise.
+    original = broker.get_positions
+    broker.get_positions = MagicMock(side_effect=ConnectionError("net down"))  # type: ignore[method-assign]
+    _ = original  # silence linter
+
+    data = MagicMock()
+    data.fetch_stock_bars.return_value = df
+
+    risk = RiskGate(
+        max_position_usd=1_000_000,
+        max_daily_loss_usd=1_000_000,
+        max_orders_per_min=999,
+    )
+    exe = Executor(broker, risk)
+    journal = MagicMock()
+    journal.run_id = "test"
+
+    from aitrade.strategy.examples.sma_crossover import SmaCrossover
+
+    strat = SmaCrossover(symbol="AAPL", fast=5, slow=20)
+    cfg = PaperRunConfig(
+        symbol="AAPL",
+        timeframe=Timeframe.MIN_1,
+        duration=timedelta(seconds=0),
+        poll_interval_secs=0,
+        target_position_notional=2_000.0,
+    )
+    # Should not raise. Position is treated as flat, so a LONG signal still
+    # results in a buy attempt; that's fine.
+    run_paper_session(strat, broker, data, exe, journal, cfg)
