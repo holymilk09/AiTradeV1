@@ -47,16 +47,20 @@ def run_paper_session(
     if not broker.is_paper:
         raise RuntimeError("paper runner refuses non-paper broker")
 
-    end_at = datetime.now(UTC) + cfg.duration
+    session_start = datetime.now(UTC)
+    end_at = session_start + cfg.duration
     seen_ts: set[datetime] = set()
     last_direction: Direction = Direction.FLAT
 
     logger.info(
-        "paper session start strategy={} symbol={} duration={}",
+        "paper session start strategy={} symbol={} duration={} session_start={}",
         strategy.strategy_id,
         cfg.symbol,
         cfg.duration,
+        session_start.isoformat(),
     )
+
+    warmed = False
     while datetime.now(UTC) < end_at:
         start = datetime.now(UTC) - timedelta(days=5)
         df = data.fetch_stock_bars(
@@ -72,9 +76,24 @@ def run_paper_session(
                 continue
             seen_ts.add(bar.timestamp)
             signal = strategy.on_bar(bar)
+
+            # Warm the strategy on bars that predate the session — feed them
+            # to on_bar() so indicators initialize, but never submit orders
+            # for historical signals. Acting on a 2-day-old SMA crossover as
+            # if it just happened is how the runner used to flood the broker.
+            if bar.timestamp < session_start:
+                continue
+
             if signal is None or signal.direction == last_direction:
                 continue
             last_direction = signal.direction
+            if not warmed:
+                warmed = True
+                logger.info(
+                    "warmup complete; first live signal direction={} at bar_ts={}",
+                    signal.direction.value,
+                    bar.timestamp.isoformat(),
+                )
 
             positions = {p.symbol: p.qty for p in broker.get_positions()}
             held = positions.get(cfg.symbol, 0.0)
