@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from aitrade.strategy.base import Strategy
+from aitrade.strategy.examples.bollinger_reversion import BollingerReversion
+from aitrade.strategy.examples.donchian_breakout import DonchianBreakout
 from aitrade.strategy.examples.sma_crossover import SmaCrossover
 
 StrategyFactory = Callable[..., Strategy]
@@ -12,6 +14,8 @@ StrategyFactory = Callable[..., Strategy]
 
 _REGISTRY: dict[str, StrategyFactory] = {
     "sma_crossover": SmaCrossover,
+    "bollinger_reversion": BollingerReversion,
+    "donchian_breakout": DonchianBreakout,
 }
 
 
