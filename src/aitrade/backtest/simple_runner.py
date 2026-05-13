@@ -17,7 +17,7 @@ import pandas as pd
 from loguru import logger
 
 from aitrade.backtest.metrics import BacktestMetrics, compute_metrics
-from aitrade.data.models import Bar
+from aitrade.data.models import Bar, Timeframe
 from aitrade.strategy.base import Strategy
 from aitrade.strategy.signal import Direction
 
@@ -28,6 +28,7 @@ class BacktestConfig:
     slippage_bps: float = 2.0
     fee_bps: float = 1.0
     target_position_notional: float = 10_000.0
+    timeframe: Timeframe = Timeframe.DAY_1
 
 
 @dataclass
@@ -57,6 +58,7 @@ def run_backtest(
     cash = cfg.starting_cash
     qty_held: dict[str, float] = {}
     avg_cost: dict[str, float] = {}
+    last_close: dict[str, float] = {}
     pending_target: dict[str, Direction] = {}
     equity_series: dict[datetime, float] = {}
     trade_pnls: list[float] = []
@@ -86,7 +88,6 @@ def run_backtest(
                     qty_held[bar.symbol] = new_held
                 else:
                     cash += notional - fee
-                    # Realized PnL on the closed portion
                     closed_qty = min(abs(delta), held) if held > 0 else 0
                     if closed_qty > 0:
                         pnl = (px - avg_cost.get(bar.symbol, px)) * closed_qty - fee
@@ -99,11 +100,11 @@ def run_backtest(
         if signal is not None:
             pending_target[signal.symbol] = signal.direction
 
-        # Mark-to-market equity.
-        position_value = sum(
-            q * bar.close for sym, q in qty_held.items() if sym == bar.symbol
-        )
-        # For multi-symbol, would need current close per symbol; single-symbol OK here.
+        # Mark-to-market across ALL held symbols using each symbol's latest
+        # observed close. Without this, multi-symbol baskets undervalue
+        # positions in symbols whose bar hasn't been observed this tick.
+        last_close[bar.symbol] = bar.close
+        position_value = sum(q * last_close.get(sym, 0.0) for sym, q in qty_held.items())
         equity_series[bar.timestamp] = cash + position_value
 
         if i % 500 == 0:
@@ -117,7 +118,7 @@ def run_backtest(
             )
 
     equity_curve = pd.Series(equity_series).sort_index()
-    metrics = compute_metrics(equity_curve, trade_pnls)
+    metrics = compute_metrics(equity_curve, trade_pnls, timeframe=cfg.timeframe)
     return BacktestResult(
         equity_curve=equity_curve,
         trade_pnls=trade_pnls,

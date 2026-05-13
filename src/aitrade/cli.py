@@ -120,13 +120,21 @@ def backtest(
         t.add_column("metric")
         t.add_column("value", justify="right")
         t.add_row("total_return_pct", f"{m.total_return_pct:+.2f}%")
+        t.add_row("cagr_pct", f"{m.cagr_pct:+.2f}%")
         t.add_row("sharpe", f"{m.sharpe:.2f}")
         t.add_row("sortino", f"{m.sortino:.2f}")
         t.add_row("max_drawdown_pct", f"{m.max_drawdown_pct:.2f}%")
+        t.add_row("mar", f"{m.mar:.2f}")
         t.add_row("num_trades", str(m.num_trades))
         t.add_row("hit_rate", f"{m.hit_rate:.2%}")
         t.add_row("avg_win", f"{m.avg_win:+.2f}")
         t.add_row("avg_loss", f"{m.avg_loss:+.2f}")
+        t.add_row("median_trade", f"{m.median_trade:+.2f}")
+        t.add_row("profit_factor", f"{m.profit_factor:.2f}")
+        t.add_row("expectancy", f"{m.expectancy:+.2f}")
+        t.add_row("longest_losing_streak", str(m.longest_losing_streak))
+        t.add_row("return_skew", f"{m.return_skew:+.2f}")
+        t.add_row("return_kurtosis", f"{m.return_kurtosis:+.2f}")
         t.add_row("final_equity", f"{m.final_equity:,.2f}")
         console.print(t)
 
@@ -147,6 +155,103 @@ def backtest(
             ),
         )
         console.print(report["report"])
+
+
+@app.command()
+def walkforward(
+    strategy: str = typer.Argument(..., help="Strategy name from the registry"),
+    symbol: str = typer.Option(..., "--symbol", "-s"),
+    start: str = typer.Option(..., "--start", help="YYYY-MM-DD"),
+    end: str = typer.Option(..., "--end", help="YYYY-MM-DD"),
+    timeframe: Timeframe = typer.Option(Timeframe.DAY_1, "--timeframe", "-t"),
+    train_days: int = typer.Option(180, "--train-days"),
+    test_days: int = typer.Option(60, "--test-days"),
+    step_days: int = typer.Option(0, "--step-days", help="0 = non-overlapping test windows"),
+) -> None:
+    """Walk-forward backtest a strategy. Prints per-fold table + aggregate."""
+    import pandas as pd
+
+    from aitrade.backtest.alpaca_adapter import df_to_bars
+    from aitrade.backtest.simple_runner import BacktestConfig
+    from aitrade.backtest.walk_forward import summary_to_dataframe, walk_forward
+    from aitrade.data.alpaca_data import AlpacaDataClient
+    from aitrade.strategy.registry import get_strategy
+
+    s = get_settings()
+    configure_logging(s.aitrade_log_dir, s.aitrade_log_level)
+
+    data = AlpacaDataClient(s)
+    df = data.fetch_stock_bars(
+        symbol,
+        timeframe,
+        datetime.fromisoformat(start).replace(tzinfo=UTC),
+        datetime.fromisoformat(end).replace(tzinfo=UTC),
+    )
+    if df.empty:
+        console.print(f"[yellow]No bars returned for {symbol}[/yellow]")
+        raise typer.Exit(code=1)
+    bars = list(df_to_bars(df, symbol))
+
+    cfg = BacktestConfig(timeframe=timeframe)
+    summary = walk_forward(
+        lambda: get_strategy(strategy, symbol=symbol),
+        bars,
+        train=pd.Timedelta(days=train_days),
+        test=pd.Timedelta(days=test_days),
+        step=pd.Timedelta(days=step_days) if step_days > 0 else None,
+        config=cfg,
+    )
+    per_fold = summary_to_dataframe(summary)
+
+    title = (
+        f"Walk-forward {strategy} {symbol} [{start} → {end}] "
+        f"train={train_days}d test={test_days}d folds={len(summary.folds)}"
+    )
+    t = Table(title=title)
+    for col in [
+        "fold",
+        "test_start",
+        "test_end",
+        "trades",
+        "sharpe",
+        "cagr%",
+        "maxDD%",
+        "profitF",
+        "expect",
+        "hitRate",
+    ]:
+        t.add_column(col, justify="right")
+    for _, row in per_fold.iterrows():
+        t.add_row(
+            str(row["fold"]),
+            str(row["test_start"].date()),
+            str(row["test_end"].date()),
+            str(int(row["test_trades"])),
+            f"{row['test_sharpe']:.2f}",
+            f"{row['test_cagr_pct']:+.1f}",
+            f"{row['test_max_dd_pct']:.1f}",
+            f"{row['test_profit_factor']:.2f}",
+            f"{row['test_expectancy']:+.2f}",
+            f"{row['test_hit_rate']:.0%}",
+        )
+    console.print(t)
+
+    agg = Table(title="Aggregate")
+    agg.add_column("metric")
+    agg.add_column("value", justify="right")
+    agg.add_row("test_sharpe_mean", f"{summary.test_sharpe_mean:.2f}")
+    agg.add_row("test_sharpe_std", f"{summary.test_sharpe_std:.2f}")
+    agg.add_row("test_expectancy_mean", f"{summary.test_expectancy_mean:+.2f}")
+    agg.add_row("test_profit_factor_median", f"{summary.test_profit_factor_median:.2f}")
+    agg.add_row("test_max_dd_worst_pct", f"{summary.test_max_dd_pct_worst:.2f}%")
+    agg.add_row("test_trade_count_total", str(summary.test_trade_count_total))
+    agg.add_row("train_test_sharpe_corr", f"{summary.train_test_sharpe_corr:+.2f}")
+    console.print(agg)
+
+    out_dir = s.aitrade_data_dir / "walkforward" / f"{strategy}_{symbol}_{start}_{end}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    per_fold.to_parquet(out_dir / "folds.parquet")
+    console.print(f"[green]Per-fold metrics → {out_dir / 'folds.parquet'}[/green]")
 
 
 @app.command()
