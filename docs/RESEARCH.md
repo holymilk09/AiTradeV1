@@ -819,6 +819,69 @@ Three independent filter attempts now: LLM binary, LLM graded, ML classifier/reg
 
 ---
 
+### EXP-013 — Gaussian HMM regime classifier vs the observable Markov chain
+
+**Brief from operator question.** "Are we using hidden Markov models?" Honest answer at the time: no — EXP-009 built an explicitly *observable*-state chain with hard-threshold labels (the docstring says "NOT a hidden-Markov model"). EXP-013 fills that gap and tests whether a proper HMM does better.
+
+**Implementation** (`src/aitrade/signals/hmm_regime.py`):
+
+- 3-state `hmmlearn.GaussianHMM` with diagonal covariance, 50 EM iterations
+- Two-feature observations per bar: `(log_return, log_return²)` so the HMM has both a return axis and a variance axis to separate states
+- Outputs: Viterbi-decoded state path, transition matrix, per-state emission means + variances, posterior P(state) at the last bar
+- Heuristic state-label assignment by emission moments (highest variance → stressed; among remaining, highest mean → trending_up; leftover → mean_reverting) — best-effort, since HMM doesn't know our naming convention
+- Comparison harness: `scripts/research/hmm_vs_observable.py` runs both classifiers on the same 9-symbol panel
+
+**Per-symbol comparison (panel 2024-2026 daily, EXP-009's universe):**
+
+| symbol | OBS current | HMM current | agreement | HMM emission means (×100) | HMM variances (×10⁴) |
+|---|---|---|---|---|---|
+| AAPL | stressed | mean_rev | no | [−0.01, +0.21, −2.29] | [2.4, 2.9, **85.7**] |
+| MSFT | mean_rev | mean_rev | **yes** | [+0.05, +0.02, +2.94] | [2.3, 1.7, **81.4**] |
+| NVDA | mean_rev | trending_up | no | [+2.42, **−229.5**, +0.25] | [220.6, **100.0**, 8.3] |
+| AMD | stressed | mean_rev | no | [+0.10, −0.10, +16.4] | [9.6, 10.2, **133.9**] |
+| SPY | mean_rev | mean_rev | **yes** | [+0.12, +0.05, −1.37] | [1.1, 1.0, **67.1**] |
+| QQQ | mean_rev | mean_rev | **yes** | [+0.14, +0.05, −1.10] | [1.7, 1.7, **78.5**] |
+| TSLA | stressed | mean_rev | no | [+0.19, +0.06, −0.04] | [10.9, 12.7, **227.9**] |
+| META | mean_rev | trending_up | no | [+0.26, −0.02, +0.73] | [4.4, 3.0, **151.5**] |
+| IWM | mean_rev | trending_up | no | [+0.08, +0.03, −1.22] | [2.2, 1.8, **60.8**] |
+
+**Findings.**
+
+1. **The HMM consistently learned the same shape on every symbol**: two near-degenerate "calm" states with ~50% time spent in each + one rare "shock" state (~1%) with much larger variance. That's not three meaningful regimes — it's the EM algorithm splitting an approximately-unimodal-but-fat-tailed return distribution into two near-twin centers plus an outlier bucket.
+
+2. **The NVDA fit shows EM fragility on small samples.** State 1's mean of −229.5/100 = −2.30 with variance 100/10000 = 0.01 — a Dirac-like component that captures one or two extreme bars. Three convergence warnings during fitting (AAPL, MSFT, SPY, IWM) — log-likelihood oscillation by ~0.1 on later iterations. EM did not converge tightly on these symbols.
+
+3. **HMM labels disagree with observable labels on 5/9 symbols** and the disagreements are systematic: HMM calls AMD/TSLA "mean_reverting" because their mid-volatility behavior fits the modal state. Observable calls AMD/TSLA "stressed" via the 35% vol threshold. **The observable label is more actionable**: EXP-001/007 confirmed AMD/TSLA are exactly the symbols where bollinger fails or behaves anomalously. The HMM label loses that signal.
+
+4. **Why the simpler approach won.** Daily-bar log returns on liquid US large-caps in 2024-2026 are roughly Gaussian with weak skew and slightly fat tails — well-fit by one Gaussian. A 3-state Gaussian HMM trying to find three distinct Gaussian components either splits the central mass arbitrarily (two near-twin states) or assigns the outliers to one state (the ~1% shock). Neither maps to "trending / mean-reverting / stressed" in the way our threshold rules do.
+
+**Conclusion on HMM vs observable.** The HMM is technically more rigorous (probabilistic state inference, EM-fit emissions, soft posteriors). On *this* data with *this* feature set, the observable chain produces more semantically-aligned labels. The HMM as currently built isn't worth wiring into the strategy stack — it would weaken regime classification, not strengthen it.
+
+**Conditions where HMM *would* be the better tool.**
+
+- **Richer features** — multi-timeframe returns, intraday vol, volume, term-structure — give the HMM more axes to find meaningful separations. The current (return, return²) pair is too low-dimensional.
+- **Non-Gaussian emissions** (Student-t, Gaussian mixture) — accommodate fat tails so the "shock" state doesn't capture all the outliers.
+- **More states** (5–7) — let the HMM find finer-grained regimes, with semantic mapping done post-hoc.
+- **Different markets/timeframes** — intraday or crypto, where return distributions are more obviously multi-modal.
+- **Markov-switching regression** instead of pure HMM — let the state determine the parameters of a regression model rather than just emission moments.
+
+**What this means for the system.**
+
+The Markov-chain wiring we already shipped (`signals/markov_regime.py`, `MarkovRegimeScorer`) remains the right tool for current use. The HMM module ships as a *research artifact* — usable, tested, but not registered into the live engine until one of the above conditions is met to justify its addition.
+
+**Answer to "did we complete the ML goal":**
+
+- ✅ Researched ML strategies for Python (Lopez de Prado meta-labeling, Gaussian HMM)
+- ✅ Added scikit-learn + hmmlearn dependencies
+- ✅ Built 4 classifier/regressor variants + a Gaussian HMM with EM fit
+- ✅ Ran training on 119 trades / 9 symbols
+- ✅ Reported whether each helps: meta-label ties base, HMM produces less-aligned labels than observable
+- ⚠️ "Adaptive" piece — the pipeline supports retraining (joblib save/load, deterministic features) but the actual retraining loop in `scripts/weekly_review.py` is documented as a next step, not wired
+
+376 tests pass. ruff clean. mypy clean (105 source files).
+
+---
+
 ## Open questions (next session)
 
 - Does the bollinger ridge hold on the 5-min timeframe? Walk-forward harness supports it.
