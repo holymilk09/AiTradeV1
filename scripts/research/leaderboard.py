@@ -79,7 +79,7 @@ def main() -> None:
             bars_by_sym[sym] = list(df_to_bars(df, sym))
 
     strategies = list_strategies()
-    print(f"=== EXP-007 strategy leaderboard ===")
+    print("=== EXP-007 strategy leaderboard ===")
     print(f"universe: {', '.join(SYMBOLS)}")
     print(f"range: {START} → {END}  ·  train=180d/test=180d daily")
     print(f"strategies: {', '.join(strategies)}\n")
@@ -104,8 +104,10 @@ def main() -> None:
             r = per_sym.get(sym)
             if r:
                 tag = "✓" if r["pass"] else " "
-                print(f"  {tag} {sym:<6} sharpe={r['sharpe']:>+5.2f} (std {r['std']:>4.2f}) "
-                      f"trades={r['trades']:>3} expect={r['expect']:>+8.1f} corr={r['corr']:>+5.2f}")
+                print(
+                    f"  {tag} {sym:<6} sharpe={r['sharpe']:>+5.2f} (std {r['std']:>4.2f}) "
+                    f"trades={r['trades']:>3} expect={r['expect']:>+8.1f} corr={r['corr']:>+5.2f}"
+                )
             else:
                 print(f"    {sym:<6} (no data)")
 
@@ -124,10 +126,13 @@ def main() -> None:
         rank_score = panel["panel_mean_sharpe"] / max(panel["panel_std_sharpe"], 0.1)
         panel["rank_score"] = rank_score
         panel_summary.append((name, panel))
-        print(f"  panel: mean={panel['panel_mean_sharpe']:+.2f} std={panel['panel_std_sharpe']:.2f} "
-              f"pass={n_pass}/{len(per_sym)}  trades={trades}  "
-              f"expect={panel['panel_mean_expect']:+.1f}  "
-              f"rank_score={rank_score:+.2f}\n")
+        print(
+            f"  panel: mean={panel['panel_mean_sharpe']:+.2f} "
+            f"std={panel['panel_std_sharpe']:.2f} "
+            f"pass={n_pass}/{len(per_sym)}  trades={trades}  "
+            f"expect={panel['panel_mean_expect']:+.1f}  "
+            f"rank_score={rank_score:+.2f}\n"
+        )
 
     # Leaderboard.
     print("=" * 90)

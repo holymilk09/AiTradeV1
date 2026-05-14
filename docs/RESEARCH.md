@@ -469,6 +469,42 @@ The dashboard does not show:
 
 ---
 
+### EXP-008 — Time-series momentum (12-1 spec) added & tested
+
+**Source.** [paperswithbacktest/awesome-systematic-trading](https://github.com/paperswithbacktest/awesome-systematic-trading) — the most-cited single-asset academic factor that fits our daily-bar Strategy Protocol cleanly. Classical spec is 12-month trailing return minus 1-month skip (avoid 1-month reversal contamination). Documented across asset classes back to 1903 (Hurst-Ooi-Pedersen 2017; Moskowitz-Ooi-Pedersen 2012; Asness-Moskowitz-Pedersen 2013).
+
+**Implementation.** `src/aitrade/strategy/examples/time_series_momentum.py`. Default params (252, 21) match the academic spec. 6 unit tests covering signal threshold, sign flip, no-emit-when-unchanged, validation, strength scaling.
+
+**Backtest results on the 8-symbol panel:**
+
+| variant | panel mean Sharpe | std | trades | panel expectancy | rank_score |
+|---|---|---|---|---|---|
+| TSMom default (252, 21) | 0.00 | 0.00 | 0 | $0 | 0.00 |
+| TSMom (63, 5) — "3-month minus 1-week" | +0.71 | 0.62 | 33 | **−$42** | +1.15 |
+| TSMom (120, 10) — "6-month minus 2-week" | +0.42 | 0.43 | 0 | $0 | 0.98 |
+
+**Findings.**
+
+1. ❌ **Default 12-1 spec doesn't fit our 180-day walk-forward windows.** The strategy needs 252 bars to first emit a signal; a fresh strategy in each 180-day test window never warms up. Zero trades on every symbol. *This is a harness limitation, not a strategy limitation* — academically the 12-1 spec is the canonical formulation; the test environment just doesn't accommodate it.
+2. ⚠️ **Short-lookback variant (63/5) has positive Sharpe but NEGATIVE expectancy.** Sharpe +0.71 across the panel, but expectancy −$42/trade. Mechanism: long holding periods capture trend exposure (good for equity-curve Sharpe), but entry/exit timing loses trade-level $ on average. Classic momentum problem — known weakness when the signal is too short.
+3. **Cross-validates the leaderboard.** TSMom (63/5) ranks rank_score 1.15 — below bollinger_reversion (2.14) and even gated bollinger (1.20). Bollinger remains the only strategy with simultaneously positive Sharpe AND positive expectancy on this universe.
+4. **The mechanism is genuinely orthogonal to bollinger** (bollinger mean-reverts, momentum trends). If we ever get TSMom working with positive expectancy, the two should combine well at the portfolio level. The fix is likely an *exit improvement* (e.g., trailing stop) rather than a different lookback.
+
+#### Updated leaderboard (post-EXP-008)
+
+| rank | strategy | panel mean Sharpe | std | pass | trades | mean expect | rank_score |
+|---|---|---|---|---|---|---|---|
+| **1** | **bollinger_reversion** | **+1.13** | 0.53 | **7/8** | 65 | **+$282.5** | **+2.14** |
+| 2 | vix_gated_bollinger | +0.66 | 0.55 | 2/8 | 39 | +$41.7 | +1.20 |
+| 3 | donchian_breakout | +0.49 | 0.41 | 1/8 | 41 | −$137.3 | +1.19 |
+| 4 | sma_crossover | +0.64 | 0.55 | 3/8 | 38 | −$123.5 | +1.17 |
+| 5 | time_series_momentum (63,5) | +0.71 | 0.62 | 3/8 | 33 | −$42.7 | +1.15 |
+| 6 | time_series_momentum (default) | 0.00 | 0.00 | 0/8 | 0 | $0 | 0.00 |
+
+Bollinger's edge over the runner-up nearly doubled. The new strategy didn't displace it.
+
+---
+
 ## Open questions (next session)
 
 - Does the bollinger ridge hold on the 5-min timeframe? Walk-forward harness supports it.

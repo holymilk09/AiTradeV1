@@ -78,7 +78,7 @@ for sym in SYMBOLS:
         all_results[sym][label] = run_one(sym, start, end)
 
 # Print per-symbol comparison.
-print(f"=== EXP-006 · temporal split · 120d/120d walk-forward ===\n")
+print("=== EXP-006 · temporal split · 120d/120d walk-forward ===\n")
 print(f"{'SYM':<6} {'H1 Sharpe':>11} {'H1 trades':>10} {'H1 expect':>10}  "
       f"{'H2 Sharpe':>11} {'H2 trades':>10} {'H2 expect':>10}  "
       f"{'delta':>7} {'sign_flip?':>10}")

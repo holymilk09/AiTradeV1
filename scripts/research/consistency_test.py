@@ -142,7 +142,8 @@ for label, fn in configs:
 # Rank configs by consistency (lower std is better) then by mean Sharpe.
 print("\n=== SUMMARY ===")
 print(f"{'config':<42} {'mean':>7} {'std':>7} {'pass':>6} {'trades':>7} {'expect':>9}")
-for label, m in sorted(summary, key=lambda x: (x[1]['panel_std_sharpe'], -x[1]['panel_mean_sharpe'])):
+_sort_key = lambda x: (x[1]['panel_std_sharpe'], -x[1]['panel_mean_sharpe'])  # noqa: E731
+for label, m in sorted(summary, key=_sort_key):
     print(f"{label:<42} {m['panel_mean_sharpe']:>+7.2f} {m['panel_std_sharpe']:>7.2f} "
           f"{m['n_with_mean_gt_std']:>2d}/{m['n']:<2d}  "
           f"{m['total_trades']:>7d} {m['mean_expectancy']:>+9.1f}")
@@ -159,7 +160,7 @@ df = client.fetch_stock_bars(
 bars = list(df_to_bars(df, "AAPL"))
 cfg = BacktestConfig(timeframe=Timeframe.DAY_1)
 runs = []
-for i in range(3):
+for _i in range(3):
     s = walk_forward(
         lambda: BollingerReversion(symbol="AAPL", period=20, num_std=1.5),
         bars, train=TRAIN, test=TEST, config=cfg,
