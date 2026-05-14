@@ -11,6 +11,7 @@ from aitrade.strategy.examples.llm_gated_bollinger import LlmGatedBollinger
 from aitrade.strategy.examples.sma_crossover import SmaCrossover
 from aitrade.strategy.examples.time_series_momentum import TimeSeriesMomentum
 from aitrade.strategy.examples.vix_gated_bollinger import VixGatedBollinger
+from aitrade.strategy.examples.vwap_ema_volume import VwapEmaVolume
 
 StrategyFactory = Callable[..., Strategy]
 
@@ -22,6 +23,7 @@ _REGISTRY: dict[str, StrategyFactory] = {
     "vix_gated_bollinger": VixGatedBollinger,
     "time_series_momentum": TimeSeriesMomentum,
     "llm_gated_bollinger": LlmGatedBollinger,
+    "vwap_ema_volume": VwapEmaVolume,
 }
 
 

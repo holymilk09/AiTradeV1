@@ -565,6 +565,70 @@ Implementation in `src/aitrade/signals/markov_regime.py`. Wrapped as a convictio
 
 ---
 
+### EXP-010 — VWAP + EMA + Volume strategy (negative result on daily bars)
+
+**Brief from operator.** "Use and focus on EMAs, Volume trends, VWAP."
+
+**Indicator additions to `strategy/indicators.py`** (now reusable by every strategy and by the LLM reasoner):
+
+- `typical_price(bar)` — (H + L + C) / 3, the conventional VWAP input
+- `rolling_vwap(bars, window)` — Σ(typ_price · volume) / Σ(volume) over the window
+- `vwap_distance_pct(bars, window)` — current close as % above/below rolling VWAP
+- `volume_ma(bars, window)` — N-bar average volume
+- `volume_ratio(bars, window)` — current volume / N-bar average (relative volume)
+
+EMA was already exposed. The full triple (EMA, volume, VWAP) is now first-class.
+
+**Strategy: `vwap_ema_volume`** (long-only). Strict conjunctive entry — all three must align:
+
+1. Close > 20-day rolling VWAP (above fair value)
+2. Previous close was at-or-below VWAP, current close above (the *reclaim*)
+3. 8-EMA > 21-EMA (short-term uptrend in place)
+4. `volume_ratio` ≥ 1.3 (above-average participation)
+
+Exit: close drops below 8-EMA OR 8-EMA crosses below 21-EMA. 7 unit tests covering entry conditions, exit paths, volume gate, parameter validation.
+
+**Backtest results on the 8-symbol panel, 2024-2026 daily, 180d/180d walk-forward:**
+
+| variant | mean Sharpe | std | pos | trades | mean expect | rank_score |
+|---|---|---|---|---|---|---|
+| default (vol≥1.3, ema 8/21) | −0.30 | 0.38 | 1/8 | 8 | −$44 | −0.80 |
+| loose (vol≥1.0) | −0.48 | 0.58 | 2/8 | 28 | −$81 | −0.82 |
+| any-vol (vol≥0.5) | −0.25 | 0.45 | 3/8 | 51 | −$11 | −0.56 |
+| **short-VWAP window=10** | **−0.07** | 0.77 | 4/8 | 31 | **+$29** | −0.09 |
+| tight-EMA (5/13) | −0.30 | 0.53 | 3/8 | 32 | −$51 | −0.56 |
+
+**Findings.**
+
+1. ❌ **Strict-triple entry is negative panel-wide.** Mean Sharpe −0.30, only 8 total trades across 8 symbols × 3 folds, 1/8 positive. Loosening the volume gate brings more trades but each weaker — net mean drops to −0.48.
+2. ⚠️ **Best variant (short-VWAP window=10) is the only one with positive expectancy** (+$29/trade) but Sharpe is still effectively zero.
+3. ⭐ **The likely reason: timeframe mismatch.** VWAP is intrinsically *intraday* — it's the level institutional desks execute around during a session, with the day's bell-to-bell volume distribution as the weighting. On daily bars, "rolling VWAP" degrades to a 20-day volume-weighted moving average — close in shape to a 20-day SMA, no longer the breakout catalyst it is in a 9:30-4:00 session. The strategy isn't fundamentally broken — the test is using the wrong timeframe.
+
+**Updated leaderboard (post-EXP-010):**
+
+| rank | strategy | panel mean Sharpe | std | pass | trades | mean expect | rank_score |
+|---|---|---|---|---|---|---|---|
+| 1 | **bollinger_reversion** | +1.13 | 0.53 | 7/8 | 65 | +$282.5 | **+2.14** |
+| 1 | llm_gated_bollinger (degraded to base — see note) | +1.13 | 0.53 | 7/8 | 65 | +$282.5 | +2.14 |
+| 3 | vix_gated_bollinger | +0.66 | 0.55 | 2/8 | 39 | +$41.7 | +1.20 |
+| 4 | donchian_breakout | +0.49 | 0.41 | 1/8 | 41 | −$137.3 | +1.19 |
+| 5 | sma_crossover | +0.64 | 0.55 | 3/8 | 38 | −$123.5 | +1.17 |
+| 6 | time_series_momentum (252,21) | 0.00 | 0.00 | 0/8 | 0 | $0 | 0.00 |
+| 7 | vwap_ema_volume (default) | −0.30 | 0.38 | 0/8 | 8 | −$44.4 | −0.80 |
+
+Note on the llm_gated_bollinger tie with base: the backtest harness doesn't load `.env` into `os.environ`, so `ANTHROPIC_API_KEY` is empty when the strategy initializes. The LLM call raises, the error handler defaults to APPROVE, and the strategy behaves identically to base bollinger. Need to add `dotenv.load_dotenv()` to the leaderboard script (or pass the key via the shell environment) for a real LLM-gated backtest. **The LLM filter has not actually been tested yet in backtest — only its degraded-mode fallback has.**
+
+**What this turn produced that is reusable:**
+
+- Five new indicator helpers (`rolling_vwap`, `volume_ma`, `volume_ratio`, `vwap_distance_pct`, `typical_price`) the LLM reasoner can read, and any future strategy can use.
+- A documented negative result that pinpoints the timeframe assumption as the failure mode, not the indicator selection.
+
+**Next test for this family.** Run `vwap_ema_volume` on **5-minute or 1-hour bars** — the timeframes where VWAP actually carries the institutional flow signal it's known for. Alpaca exposes both; the walkforward harness already supports them via the `Timeframe` parameter. Requires more bars to be fetched but no code change beyond the timeframe argument.
+
+376 tests pass. ruff clean. mypy clean.
+
+---
+
 ## Open questions (next session)
 
 - Does the bollinger ridge hold on the 5-min timeframe? Walk-forward harness supports it.

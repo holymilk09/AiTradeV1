@@ -76,6 +76,65 @@ def atr(bars: list[Bar], window: int = 14) -> float | None:
     return sum(trs[-window:]) / window
 
 
+def typical_price(bar: Bar) -> float:
+    """(high + low + close) / 3 — the conventional VWAP price input."""
+    return (bar.high + bar.low + bar.close) / 3.0
+
+
+def rolling_vwap(bars: list[Bar], window: int) -> float | None:
+    """Volume-weighted typical-price average over the last ``window`` bars.
+
+    Σ(typ_price × volume) / Σ(volume), trimmed to the rolling window.
+    Returns None if fewer than ``window`` bars or total volume is zero.
+    """
+    if len(bars) < window:
+        return None
+    recent = bars[-window:]
+    pv = 0.0
+    v = 0.0
+    for b in recent:
+        pv += typical_price(b) * b.volume
+        v += b.volume
+    if v <= 0:
+        return None
+    return pv / v
+
+
+def vwap_distance_pct(bars: list[Bar], window: int) -> float | None:
+    """(close - vwap) / vwap, percent. >0 = above VWAP, <0 = below.
+
+    Useful as a setup feature — close just crossed VWAP from below, etc.
+    """
+    if not bars:
+        return None
+    vwap = rolling_vwap(bars, window)
+    if vwap is None or vwap <= 0:
+        return None
+    return (bars[-1].close / vwap - 1.0) * 100.0
+
+
+def volume_ma(bars: list[Bar], window: int) -> float | None:
+    """Simple average volume over the last ``window`` bars."""
+    if len(bars) < window:
+        return None
+    return sum(b.volume for b in bars[-window:]) / window
+
+
+def volume_ratio(bars: list[Bar], window: int) -> float | None:
+    """Current bar volume / ``window``-bar average. >1 means above-average flow.
+
+    A ratio of 1.5 means today is 50 % above its trailing average — the
+    classic threshold for "institutional participation" in many trend
+    setups.
+    """
+    if len(bars) < window + 1:
+        return None
+    avg = volume_ma(bars[:-1], window)
+    if avg is None or avg <= 0:
+        return None
+    return bars[-1].volume / avg
+
+
 def _macd(values: list[float]) -> tuple[float | None, float | None]:
     e12 = ema(values, 12)
     e26 = ema(values, 26)
