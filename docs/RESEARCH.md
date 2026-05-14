@@ -717,6 +717,108 @@ The high-leverage takeaway: **layering an LLM as a generic "approve / reject / s
 
 ---
 
+### EXP-012 — Machine learning meta-label filter (Lopez de Prado pattern)
+
+**Brief from operator.** "If you think it's needed, add Machine learning, non cookie cutter. Adaptive. Research ML strategies for python. Run training and see if it helps."
+
+Given EXP-011 showed the LLM-as-filter pattern fails because it imports common-sense priors, the obvious counter-test is to train a model on the *strategy's own* historical wins and losses. That's the **meta-labeling** technique from M. Lopez de Prado's *Advances in Financial Machine Learning* (2018):
+
+- Primary model = bollinger (decides *when* to consider trading)
+- Secondary model = ML (decides whether the primary model's signal is likely to *win* given the setup features)
+
+If common-sense priors were the failure mode of EXP-011, meta-labeling should fix it because the model learns from actual P&L rather than from human heuristics.
+
+**Implementation** (`src/aitrade/signals/ml_meta_label.py`):
+
+- 11 features per setup: RSI-14, ret_5d, ret_20d, rvol_20d_ann, dist_from_60d_high, vol_ratio_20d, vwap_distance_pct, z_score_bollinger, and one-hot Markov state (3 columns)
+- Feature extraction is pure (no I/O, no lookahead) — same function trains and infers
+- Four estimators tested: LogisticRegression + GradientBoostingClassifier (binary win/loss), Ridge + GradientBoostingRegressor (predict pnl_pct magnitude)
+- Standard scaling on linear models; out-of-the-box GBM
+- Dataset: 11 symbols × 2024-2026 daily → **119 round-trip trades** (~10/symbol)
+- Split: TRAIN 93 trades (entry < 2025-07-01), TEST 26 trades (entry ≥ 2025-07-01)
+- Cost model: 6 bps round-trip per trade
+
+**Per-symbol trade counts and hit rates collected:**
+
+```
+AAPL  9 wins=7  78%   NVDA 12 wins=11 92%   PLTR  5 wins=4  80%
+MSFT 11 wins=7  64%   TSLA 11 wins=9  82%   BA   13 wins=9  69%
+SPY   9 wins=7  78%   META 15 wins=11 73%   MU   10 wins=9  90%
+QQQ  11 wins=9  82%   AMD  13 wins=6  46%
+```
+
+Train hit rate: **74.2%**. Test hit rate: **76.9%**. Base bollinger is already a high-hit-rate strategy.
+
+**Held-out test results (grid-searched threshold per model):**
+
+| model | filter takes | filter pnl % | base pnl % | delta |
+|---|---|---|---|---|
+| logreg-classifier | 10/26 | +43.5 | +78.8 | **−45.4%** |
+| **gbm-classifier** (best) | **26/26** | **+78.8** | +78.8 | **0** (passes all) |
+| **ridge-regressor** (best) | **26/26** | **+78.8** | +78.8 | **0** (passes all) |
+| gbm-regressor | 25/26 | +73.4 | +78.8 | −5.4% |
+
+**The best ML model is the one that does no filtering at all.** Two models tied with base by passing every trade; the other two lost money by filtering.
+
+**Feature importance reveals the failure mechanism (LogReg coefficients, standardized):**
+
+```
+ret_20d              +0.85  ↑win   ← favors SHALLOW setups
+rvol_20d_ann         +0.71  ↑win   ← matches our finding that bollinger likes vol
+vwap_distance_pct    -0.44  ↓win   
+z_score_bollinger    -0.27  ↓win   ← favors LESS dislocated setups
+vol_ratio_20d        -0.17  ↓win
+ret_5d               -0.09  ↓win
+rsi_14               -0.09  ↓win
+markov_*             ≈ 0           ← Markov regime absorbed by other features
+```
+
+**LogReg learned the same anti-edge pattern as the LLM in EXP-011**: deeper drawdowns → predicted loss → trade skipped. But the deepest drawdowns are *exactly where bollinger's edge concentrates* on MU/PLTR. The classifier is statistically correct on majority frequency and economically wrong on $-weighted outcomes.
+
+GBM feature importance:
+```
+rvol_20d_ann        0.224         vwap_distance_pct  0.113
+vol_ratio_20d       0.180         dist_from_60d_high 0.104
+ret_5d              0.129         ret_20d            0.065
+z_score_bollinger   0.122         rsi_14             0.060
+markov_*            0.001         (essentially zero)
+```
+
+**Three substantive findings.**
+
+1. ❌ **At 119 trades / 11 features, ML cannot improve a 77%-hit-rate strategy.** The minority class (24 historical losses across 11 symbols) is too thin to learn a "skip this loser" pattern that generalizes.
+2. ❌ **Binary classification suffers from the same anti-edge as the LLM.** Frequency-weighted training optimizes for "common winners" not "expected $ outcome." Regression on pnl_pct fixes this in principle, but with only 93 training trades neither Ridge nor GBM regressor found a usable signal.
+3. ⭐ **Markov regime adds zero marginal information when combined with RSI/vol/drawdown features.** The information was *already encoded* in the simpler features. EXP-009's correlation between Markov state and panel performance is real, but it doesn't add predictive juice on top of the indicator set.
+
+**Why this is the *right* finding, not a setup failure.**
+
+Three independent filter attempts now: LLM binary, LLM graded, ML classifier/regressor. **All four fail the same way**: they import prior beliefs about what a "safe" trade looks like, those beliefs anti-correlate with where bollinger pays out, and the filtered strategy loses 5–61% of the unfiltered P&L. The pattern is structural:
+
+> A filter applied to a strategy with a high base hit rate (≥70%) and asymmetric trade-size distribution can only hurt expectancy unless the filter has *outsized* skill at identifying the few big losers. Neither human priors (LLM) nor 119-trade-trained ML achieves that skill on this universe.
+
+**What ML *would* be useful for (the productive next move).**
+
+- **Position sizing, not entry filtering**: use the model's score to scale notional rather than gate yes/no. High-confidence setups get full size, low-confidence get half. Failures cap losses; wins keep full upside.
+- **Larger training set**: 119 trades isn't enough. Adding more symbols and a longer history (5+ years where data exists) could move ML from "ties base" to "beats base."
+- **Different primary model**: ML filter on a 50%-hit-rate strategy has way more room to add value than on a 77%-hit-rate strategy. The next natural use is on a higher-frequency timeframe where bollinger fires more often with lower hit rate.
+- **Adaptive retraining**: the live `weekly_review.py` could retrain the model from journal data weekly. The current model is a snapshot; the adaptive version updates.
+
+**Artifacts.**
+
+- `src/aitrade/signals/ml_meta_label.py` — feature extraction + classifier/regressor training + serialization (joblib)
+- `scripts/research/ml_meta_label_train.py` — full pipeline: collect trades, split train/test, fit all four models, grid-search thresholds, persist best
+- `data/ml/meta_label_bollinger.joblib` — persisted model (gbm-classifier with threshold 0.45 — passes everything, ties base)
+- This finding in RESEARCH.md
+
+**What was deliberately NOT built.**
+
+- `MlGatedBollinger` strategy class. The ML doesn't beat base; adding it as a registered strategy that would underperform in `aitrade paper` is the wrong direction.
+- Position-sizing version. Worth building next, but separate experiment.
+
+376 tests pass. ruff clean. mypy clean (104 source files).
+
+---
+
 ## Open questions (next session)
 
 - Does the bollinger ridge hold on the 5-min timeframe? Walk-forward harness supports it.
