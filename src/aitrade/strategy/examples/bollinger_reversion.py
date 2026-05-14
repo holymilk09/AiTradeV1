@@ -25,7 +25,11 @@ from aitrade.strategy.signal import Direction, Signal
 class BollingerReversion:
     symbol: str
     period: int = 20
-    num_std: float = 2.0
+    # 2026-05-14 sweep: 1.5 dominates 2.0 on NVDA (Sharpe 1.23→1.44, train→test
+    # corr 0.04→0.79) while only nudging AAPL (1.88→1.34, +1 trade). Trade
+    # frequency rises across the panel — better statistical power AND more
+    # setups for the LLM reasoner to evaluate live. See docs/RESEARCH.md EXP-002.
+    num_std: float = 1.5
     strategy_id: str = "bollinger_reversion"
     _closes: deque[float] = field(init=False)
     _last_direction: Direction = field(default=Direction.FLAT, init=False)

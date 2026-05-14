@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Local-dev wrapper around `aitrade` that defends against the macOS quirk
+# where uv-installed editable .pth files keep getting marked hidden via
+# com.apple.provenance, which makes Python's site.py skip them and breaks
+# all `import aitrade` calls until you re-run `chflags nohidden`.
+#
+# Use this in place of `uv run aitrade ...` or `./.venv/bin/aitrade ...`
+# until we move to a uv version that doesn't trip this.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "$(uname)" == "Darwin" ]] && compgen -G "$here/.venv/lib/python*/site-packages/*.pth" >/dev/null; then
+  chflags nohidden "$here"/.venv/lib/python*/site-packages/*.pth 2>/dev/null || true
+fi
+exec "$here/.venv/bin/aitrade" "$@"

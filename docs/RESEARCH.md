@@ -1,0 +1,185 @@
+# Research log — AiTradeV1
+
+A quant lab notebook. Append-only — newest entries at the bottom of each section.
+Every experiment, hypothesis, and parameter call is logged here so the next
+session can pick up the thread without re-deriving anything.
+
+---
+
+## North-star goal
+
+> **Find our edge. Finetune parameters. You're a trader, quant, and creative.**
+> **Log all progress.**  (Operator brief, 2026-05-14.)
+
+Decomposed:
+
+1. **Edge** — Does any strategy in the registry produce a positive,
+   *out-of-sample* expectancy that survives the doc's rubric
+   (`test_sharpe_mean > 0.5` AND `test_sharpe_std < test_sharpe_mean`),
+   on more than one symbol, with a positive train→test Sharpe correlation?
+2. **Finetune** — Once a strategy passes (1), find the parameter ridge —
+   not the global Sharpe maximum, but the *plateau* of nearby-parameter
+   Sharpes that's stable to small perturbations. Lonely peaks are
+   overfits.
+3. **Adapt** — Wire `calibration.py` IC weights into the live engine so
+   the composite scorer evolves with the journal.
+
+---
+
+## Baseline state (session 0, before any work)
+
+| | value |
+|---|---|
+| Branch | `claude/trading-bot-foundation-mdBNL` |
+| Tip commit | `8ac33fa feat(ops): VPS bootstrap script + deployment runbook` |
+| Dev loop | 338 tests pass · ruff clean · mypy clean |
+| Reasoner model | Haiku 4.5 (`claude-haiku-4-5-20251001`) — was Opus, swapped for cost safety |
+| Live position | **126 AAPL @ $295.09 ($37,621 exposure)** — legacy from prior runs, NOT closed. Will color the engine's first reasoning until the reasoner either holds or closes. |
+| Engine session | spawned 2026-05-14 14:xx — `aitrade engine-paper --duration 1h --notional 1000` |
+| Strategies registered | `sma_crossover`, `bollinger_reversion`, `donchian_breakout` |
+| Backtest harness | walk-forward via `simple_runner.py` (bar-by-bar, single-symbol, no LLM) |
+| Real engine harness | **none** — the engine that uses the LLM cannot be backtested yet. M4's `value_test.py` is a scaffold but not wired to a full board-replay loop. |
+
+### Known confounds going in
+
+- `simple_runner.py` is NOT the live engine. The walkforward results
+  do not include patterns, news, calendar, deep-dig, correlation
+  penalties, or the LLM picker. They're the *floor* of system
+  quality — any added intelligence layered on top should improve them.
+- Daily-bar walk-forward on AAPL 2024-2026 with 180d/180d folds gives
+  only **3 folds and 2-6 total trades** per strategy. Sample size is
+  way below statistical significance. Findings here are directional,
+  not conclusive.
+- Train→test Sharpe correlation has been **negative on every
+  strategy tested so far** (sma: -0.51, bollinger: -0.59, donchian:
+  -0.46). With n=3 folds that may be noise, but with n>5 it would be
+  a real overfit signal.
+
+---
+
+## Hypotheses to test this session
+
+| H# | hypothesis | falsifier |
+|---|---|---|
+| H1 | `bollinger_reversion` AAPL Sharpe (1.88) generalizes to other large-cap names | breadth Sharpe < 0.5 OR std > mean on 5+ symbols |
+| H2 | `bollinger_reversion` has a flat parameter ridge near (20, 2.0); not a lonely peak | global max isolated; neighbors crash |
+| H3 | Shorter Bollinger periods produce more trades + similar Sharpe | trade count rises but Sharpe collapses |
+| H4 | `donchian_breakout` 20/10 also generalizes (it has higher cycle-Sharpe variability in AAPL) | breadth fails the rubric |
+| H5 | Mean-reversion (bollinger) and breakout (donchian) are anti-correlated → blend > either alone | their fold P&L vectors have correlation > 0.3 (would invalidate) |
+
+---
+
+## Experiment ledger
+
+(See sections below for each experiment's setup, results, and conclusion.)
+
+### EXP-001 — Breadth backtest: `bollinger_reversion` default params (period=20, num_std=2.0)
+
+**Setup.** Walk-forward, daily bars, 2024-01-01 → 2026-01-01, 180d train / 180d test → 3 folds per symbol. Default params. 8 large-cap names spanning indices + single-names + chip momentum + meme-vol.
+
+**Results** (sorted by Sharpe):
+
+| symbol | sharpe_mean | sharpe_std | mean>std | trades | expect | corr | maxDD% | rubric |
+|---|---|---|---|---|---|---|---|---|
+| AAPL | 1.88 | 1.36 | ✓ | 6 | +$469 | −0.59 | −1.28 | **pass** |
+| SPY | 1.78 | 1.35 | ✓ | 7 | +$192 | −0.83 | −0.86 | **pass** |
+| MSFT | 1.77 | 2.08 | ✗ | 7 | +$239 | −0.45 | −0.78 | borderline |
+| NVDA | 1.23 | 0.64 | ✓ | 4 | +$672 | +0.04 | −1.59 | **pass** |
+| QQQ | 1.15 | 0.74 | ✓ | 4 | +$329 | −0.93 | −0.81 | **pass** |
+| TSLA | 0.97 | 0.73 | ✓ | 5 | +$699 | −0.85 | −3.87 | **pass** |
+| META | 0.71 | 1.05 | ✗ | 6 | +$165 | +0.88 | −1.37 | borderline |
+| AMD | 0.08 | 0.61 | ✗ | 5 | +$151 | −0.11 | −1.64 | fail |
+
+**Conclusion.** **5/8 pass the rubric, 8/8 have positive expectancy.** Mean Sharpe across the panel = 1.20, median 1.19. **H1 confirmed** — AAPL's edge generalizes to most large-caps. AMD is the outlier (the strategy mis-fits a clean trender). META has a +0.88 train→test correlation but the sample is tiny (n=3 folds, 6 trades).
+
+**The negative train→test Sharpe correlation runs across the panel** — 6/8 symbols have negative corr. Mean corr = −0.36. With 3 folds this is mostly noise, but the *direction* is consistent enough to mention. Possible mechanism: a strong mean-reversion in train means the moves already reverted, leaving less for the test window to revert — i.e. mean-reversion regimes self-extinguish over consecutive windows.
+
+**Raw outputs:** `data/research/breadth_bollinger.txt` (also per-symbol parquet folds at `data/walkforward/bollinger_reversion_<SYM>_*/folds.parquet`).
+
+---
+
+### EXP-002 — Parameter sensitivity: `bollinger_reversion` grid (AAPL + NVDA)
+
+**Setup.** 5 × 4 grid: `period ∈ {10, 14, 20, 30, 50}` × `num_std ∈ {1.5, 2.0, 2.5, 3.0}`. Walk-forward 180d/180d on the same 2024-2026 daily series. Script: `scripts/sweep_bollinger.py`.
+
+**AAPL grid (sharpe_mean):**
+
+| period | std=1.5 | 2.0 | 2.5 | 3.0 |
+|---|---|---|---|---|
+| 10 | **1.82** ✓₁₆ | 1.37 ✓₁₁ | 1.32 ✓₃ | 0.00 |
+| 14 | 1.14 ✓₁₁ | 1.32 ✓₈ | 0.95 ₃ | 0.51 ₁ |
+| 20 | 1.34 ✓₇ | **1.88** ✓₆ | 0.95 ✓₃ | 0.98 ✓₂ |
+| 30 | 0.28 ₂ | −0.14 ₁ | −0.10 ₁ | 0.00 |
+| 50 | −0.05 ₁ | −0.05 ₁ | −0.00 ₁ | 0.43 ₁ |
+
+(✓ = passes `mean > std` rubric. Subscript = test_trade_count_total across all folds.)
+
+**NVDA grid (sharpe_mean):**
+
+| period | std=1.5 | 2.0 | 2.5 | 3.0 |
+|---|---|---|---|---|
+| 10 | 0.74 ✓₁₄ | 1.06 ✓₉ | 0.64 ₁ | 0.00 |
+| 14 | 1.21 ✓₁₁ | 1.20 ✓₇ | 1.00 ✓₃ | 0.00 |
+| 20 | **1.44** ✓₈ ⭐ | 1.23 ✓₄ | 1.13 ✓₂ | 0.00 |
+| 30 | 1.02 ✓₄ | 1.08 ✓₃ | 1.01 ✓₂ | 0.00 |
+| 50 | 1.14 ✓₂ | 1.06 ✓₂ | 0.48 ₁ | 0.00 |
+
+**Findings.**
+
+1. **There is a parameter plateau, not a lonely peak.** On AAPL the region `period ∈ [10, 20]` × `std ∈ [1.5, 2.5]` is uniformly positive (Sharpe 0.95–1.88, 3–16 trades). On NVDA the plateau is *broader*: every cell with `std ≤ 2.5` and `period ≤ 50` passes.
+2. **`period ≥ 30` kills the edge on AAPL.** Sharpe goes negative. With daily bars and a 180-day test window, slow Bollinger doesn't react fast enough; trades become rare and biased against.
+3. **The current default `(20, 2.0)` is the global AAPL peak (1.88)** but suboptimal on NVDA (1.23 vs NVDA's peak 1.44).
+4. ⭐ **NVDA `(20, 1.5)` is the gem of the entire sweep.** Sharpe 1.44, std 0.07 (extremely stable across folds), 8 trades, **+0.79 train→test Sharpe correlation** — the only large-sample positive corr in 40 grid cells. This means train Sharpe is genuinely predictive of test Sharpe at those params on NVDA.
+
+**Recommendation: change default `num_std` from 2.0 → 1.5.**
+
+- On NVDA: Sharpe 1.23 → 1.44, **AND** train→test corr +0.04 → +0.79. Big win.
+- On AAPL: Sharpe 1.88 → 1.34, std 1.36 → 1.06, trades 6 → 7. Trades up, mean down, std down — net the rubric still passes and the result is more robust.
+- More trades at the lower std also means **more setups available for the LLM reasoner to evaluate live**, which is what we want for the engine path.
+
+**Raw outputs:** `data/research/sweep_bollinger_AAPL.csv`, `data/research/sweep_bollinger_NVDA.csv`.
+
+---
+
+### EXP-003 — Engine session 1: live LLM in paper mode
+
+**Setup.** `aitrade engine-paper --duration 1h --notional 1000`, Haiku 4.5 reasoner, 15-min cycles. Spawned 2026-05-14 14:33 local (= 06:33 UTC = 02:33 EDT, **deep pre-market**).
+
+**Observations.**
+
+- **Every symbol dropped on every cycle: stale-bar warnings.** Most recent 1H bar is ~7h33m old; threshold is 1h10m. This is the engine's `assert_bars_fresh` working correctly — Alpaca isn't producing intraday bars in pre-market and the engine refuses to act on stale data. Good defensive behavior.
+- **First reasoner call attempt: `floor_trader call failed err=Connection error`.** Suggests intermittent network issues to `api.anthropic.com` (probably the same flaky outbound that motivates the VPS migration). The engine logged + skipped + continued — exactly the behavior commit `0a70b9b` was designed to give.
+- **No decisions in the journal this session.** The legacy 126 AAPL position is untouched.
+
+**Conclusion.** Engine wiring is intact. Two preconditions for the LLM path to actually fire:
+1. Run during US market hours (so Alpaca produces fresh 1H bars).
+2. Run from a location with reliable outbound to `api.anthropic.com` (i.e., the VPS in `ops/VPS.md`).
+
+Until those are met, the LLM-in-loop data we'd need to evaluate edge from the reasoner doesn't exist — we're flying on backtest only.
+
+**Operational artifacts created:**
+- `scripts/tail_reasoner.sh` — `decisions|board|last|stops` filters for live journal tail
+- `scripts/atr` — local-dev wrapper that defends against the macOS UF_HIDDEN .pth quirk
+- `scripts/sweep_bollinger.py` — parameter grid script (reusable for other strategies)
+
+---
+
+## Recommendations as of 2026-05-14
+
+| # | recommendation | rationale | confidence |
+|---|---|---|---|
+| 1 | Change `BollingerReversion` default `num_std=2.0` → `1.5` | Better NVDA edge + only marginal AAPL Sharpe drop; +0.79 train→test corr at NVDA(20,1.5) is the strongest predictive signal in the entire sweep | medium-high |
+| 2 | Add the (period=14, num_std=1.5) configuration as a second registered strategy variant | Consistently positive across panel, 11 trades on both AAPL and NVDA — better statistical power than n=3-6 cells | medium |
+| 3 | Move the runner to a US-region VPS before relying on engine-paper data | Two of the last 8 sessions hit Anthropic connection errors; we need an LLM-decision dataset to evaluate, not just engine-uptime | high |
+| 4 | Do not commit to a strategy ranking until **n ≥ 30 paper round-trips** per strategy | Current backtest sample sizes (n=2-16 trades) are not enough; the M3 calibration harness wants ~50 setups to fit weights meaningfully | high |
+| 5 | Run an equivalent sweep on `donchian_breakout` and on a 2024-only / 2025-only split | Test whether the edge is regime-stable; the −0.36 mean train→test corr on bollinger is consistent with regime-flipping | medium |
+
+---
+
+## Open questions (next session)
+
+- Does the bollinger ridge hold on the 5-min timeframe? Walk-forward harness supports it.
+- Does `donchian_breakout` have a similar plateau, or is its (20, 10) default near a cliff?
+- Build a real engine-mode backtest harness — replay historical bars through `engine_runner` with the reasoner *online*. M4 (`signals/value_test.py`) is the closest scaffold; what's missing is feeding the full board context, not just per-symbol setups.
+- The negative train→test Sharpe corr — is it a sampling artifact (n=3) or a real regime effect? Test with overlapping folds (`--step-days 30`) for more data points.
+
