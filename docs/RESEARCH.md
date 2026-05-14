@@ -629,6 +629,94 @@ Note on the llm_gated_bollinger tie with base: the backtest harness doesn't load
 
 ---
 
+### EXP-011 — LLM as a strategy filter: three independent results, one clean verdict ⭐
+
+**Setup.** Three probes of the same hypothesis ("can the LLM improve bollinger entries?") at escalating sophistication, on the same 5-symbol universe (AAPL, PLTR, MSFT, BA, MU), real Haiku 4.5 calls, 2024-2026 daily bars.
+
+#### Result 11a — Binary LLM gate is prompt-bias-dominated
+
+`LlmGatedBollinger` with two opposing prompts on the same 51 Bollinger entry setups:
+
+| prompt style | approves | rejects |
+|---|---|---|
+| Conservative ("reject falling knives") | **1** | 50 |
+| Contrarian ("default approve, only structural breaks reject") | **52** | 0 |
+
+Same chart context. Same indicator features. **Opposite outcomes purely from the prompt framing.** The LLM follows the bias literally — it isn't grading setups, it's enforcing the instruction. Every approve cited "canonical / textbook oversold setup" with near-identical reasoning across all 52 bars including those with very different RSI / drawdown / vol values.
+
+This rules out the simple "let the LLM say yes/no" pattern.
+
+#### Result 11b — Graded scoring (1-10) DOES differentiate
+
+`scripts/research/llm_gate_score_probe.py` — same 51 entries, but the LLM is asked for a 1-10 score against an explicit additive rubric (+2 RSI<30, +1 normal vol, −2 vol>70%, etc.).
+
+| symbol | n | mean | std | min | max | independent Markov stressed % |
+|---|---|---|---|---|---|---|
+| AAPL | 11 | 8.18 | 0.83 | 6 | 9 | 21% |
+| MSFT | 11 | 8.09 | 1.16 | 5 | 9 | 18% |
+| BA | 14 | 7.14 | 1.30 | 5 | 9 | n/a |
+| PLTR | 5 | **5.80** | **2.48** | **3** | 9 | (high-vol meme) |
+| MU | 11 | **5.45** | **2.57** | **3** | 9 | 99% (EXP-009) |
+
+The score distribution **independently rediscovers the Markov regime classification** — symbols flagged as stressed get lower mean scores and wider spreads. The LLM grades within-symbol setups too: MU 2025-04-03 gets 3 ("panic vol >70%, distance >−30% suggesting sustained downtrend"), and MU 2025-07-16 gets 9 ("canonical oversold setup"). Real differentiation.
+
+This *looks* like progress. It isn't.
+
+#### Result 11c — Filtering on the score makes the strategy materially WORSE
+
+`LlmScoredBollinger` with `min_score=7` (the cut-point that empirically separates "canonical" from "panic / structural") vs base `BollingerReversion`. Both run single-pass over the full 2024-2026 daily series. Same notional ($10K per trade).
+
+| symbol | base trades / P&L | scored ≥7 trades / P&L | delta |
+|---|---|---|---|
+| AAPL | 10 / +$1,282.62 | 9 / +$990.39 | −$292.23 |
+| PLTR | 5 / +$4,648.42 | 2 / +$1,012.94 | **−$3,635.48** |
+| MSFT | 11 / +$1,865.65 | 8 / +$1,295.63 | −$570.02 |
+| BA | 14 / +$3,171.62 | 8 / +$1,831.37 | −$1,340.25 |
+| MU | 11 / +$7,428.79 | 3 / +$1,961.46 | **−$5,467.33** |
+| **TOTAL** | **51 / +$18,397.10** | **30 / +$7,091.79** | **−$11,305.31** |
+
+**The LLM gate destroys 61% of the strategy's profit.** Every symbol gets worse. The cost is concentrated on PLTR and MU — the volatile names where bollinger has its biggest payoffs.
+
+#### Mechanism — why graded LLM scoring still loses
+
+The LLM is following its own scoring rubric correctly:
+- RSI 11 + 43% drawdown + 80% vol → score 3 ("structural breakdown / falling knife")
+- RSI 39 + 8% drawdown + 20% vol → score 8 ("canonical oversold")
+
+This is *correct prudent-trader reasoning*. And it's **anti-correlated with where bollinger reversion pays out.** The 90.9% win rate / +$675/trade on MU's base bollinger comes precisely from those "falling knife" setups. The LLM was trained on general market wisdom that says "don't catch falling knives" — bollinger's edge says "actually, catch the ones in liquid US names because they revert."
+
+Cross-validations of the mechanism:
+
+1. **The 3 MU trades the LLM took were 100% winners.** So the LLM CAN identify good setups. But it skipped 8 *other* MU winners worth $5.5K because they looked too dangerous.
+2. **Cost scales with strategy effectiveness.** AAPL (smallest base P&L of the five) → smallest loss from gating. MU (biggest base P&L) → biggest loss from gating.
+3. **The graded scores correlate with the *kind* of setup, not with outcome.** Markov regime, RSI levels, vol percentile — the score predicts these inputs accurately. But forward-return doesn't care about those inputs in the same direction the LLM does.
+
+#### What this means for using LLMs in our system
+
+| use case | verdict |
+|---|---|
+| Binary LLM filter on a deterministic strategy | ❌ prompt-bias dominates, null finding |
+| Graded LLM scoring as a filter on bollinger | ❌ scores discriminate but anti-correlate with edge; gate destroys 61% of P&L |
+| LLM as REGIME CLASSIFIER (not as gate) | ✅ scores correlate with Markov regime — useful as a feature, not as a final-pick filter |
+| LLM as the **board picker** (engine_runner.py) | unknown — needs live data; never tested due to network |
+| LLM for narrative / sizing / risk veto on extreme setups | likely useful (different role from filter) |
+| LLM scoring with sector / news / earnings context | unknown — would need more features in the prompt |
+
+The high-leverage takeaway: **layering an LLM as a generic "approve / reject / score" filter on top of a deterministic edge is the wrong architecture.** The LLM imports common-sense priors that may be anti-correlated with the strategy's edge mechanism. The right use is as a feature *input* (like Markov regime) for the LLM-as-board-picker pattern, where the LLM compares candidates against each other rather than judging a single setup in isolation.
+
+#### What this turn produced
+
+- `LlmScoredBollinger` strategy class (graded 1-10 scoring, threshold gate) — registered, available for future tuning experiments
+- `scripts/research/llm_gate_probe.py` — single-pass diagnostic for any LLM-gated strategy
+- `scripts/research/llm_gate_score_probe.py` — graded-scoring diagnostic with score distributions
+- `scripts/research/llm_scored_panel.py` — A/B comparison harness for base vs LLM-gated
+- Three real-LLM probes across 5 symbols (~165 Haiku calls total, ~$0.10 in tokens)
+- The verdict: at this level of context and prompt sophistication, the LLM-as-filter pattern doesn't help bollinger — and the score-vs-outcome anti-correlation is the *mechanism*, not just noise.
+
+376 tests pass. ruff clean. mypy clean (103 source files).
+
+---
+
 ## Open questions (next session)
 
 - Does the bollinger ridge hold on the 5-min timeframe? Walk-forward harness supports it.

@@ -117,8 +117,12 @@ def test_llm_error_defaults_to_approve(monkeypatch) -> None:
 
 
 def test_missing_api_key_raises_on_first_real_call(monkeypatch) -> None:
-    """If the key is absent AND we'd actually call the LLM, raise."""
+    """If the key is absent (env AND Settings empty) AND we'd actually
+    call the LLM, raise."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     strat = LlmGatedBollinger(symbol="TEST", period=20, num_std=2.0)
+    # Even with .env on disk present, force the in-memory key to empty
+    # to test the "neither source has it" branch.
+    strat._api_key = ""
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
         strat._get_client()

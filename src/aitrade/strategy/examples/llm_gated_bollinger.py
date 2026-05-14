@@ -44,6 +44,7 @@ from typing import Any
 
 from loguru import logger
 
+from aitrade.config import get_settings
 from aitrade.data.models import Bar, Quote
 from aitrade.execution.orders import Fill
 from aitrade.strategy.examples.bollinger_reversion import BollingerReversion
@@ -74,7 +75,14 @@ class LlmGatedBollinger:
             symbol=self.symbol, period=self.period, num_std=self.num_std
         )
         self._closes = deque(maxlen=_HISTORY_FOR_CONTEXT)
-        self._api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        # Prefer Settings (loads .env via pydantic-settings); fall back to
+        # raw env for direct-shell invocations.
+        try:
+            self._api_key = get_settings().anthropic_api_key.get_secret_value()
+        except Exception:
+            self._api_key = ""
+        if not self._api_key:
+            self._api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -135,7 +143,7 @@ class LlmGatedBollinger:
         rsi = _rsi(closes[-15:]) if len(closes) >= 15 else 50.0
 
         prompt = (
-            f"You are a disciplined US equities trader.\n\n"
+            f"You are a contrarian mean-reversion specialist on a quant desk.\n\n"
             f"Bollinger mean-reversion strategy just signaled BUY on {self.symbol} "
             f"at ${last_close:.2f}.\n"
             f"Setup context: {signal.reason}\n\n"
@@ -146,10 +154,24 @@ class LlmGatedBollinger:
             f"  - Distance from 60d high: {dist_from_high:+.1f}%\n"
             f"  - RSI-14:          {rsi:.0f}\n"
             f"\n"
-            f"Mean-reversion works best when the setup is a *temporary* "
-            f"dislocation, NOT a name in a sustained downtrend or breaking "
-            f"to new lows. Reject if you see a falling-knife pattern; "
-            f"approve if it looks like an oversold bounce candidate.\n"
+            f"IMPORTANT FRAMING. Bollinger mean-reversion entries are designed to "
+            f"look ugly — closing below the lower band requires a sharp recent "
+            f"drop. Negative 5d/20d returns and being meaningfully below the "
+            f"60-day high are PRE-CONDITIONS for the trade, not red flags.\n"
+            f"The empirical edge of this setup on liquid US large-caps is "
+            f"+0.95 to +1.88 Sharpe across multiple symbols and walk-forward "
+            f"folds (panel mean Sharpe +1.13 across an 8-name universe). You "
+            f"add value by REJECTING the small fraction of setups that are "
+            f"genuinely structurally broken, NOT by avoiding the standard "
+            f"oversold-bounce pattern.\n"
+            f"\n"
+            f"REJECT ONLY for clear structural reasons:\n"
+            f"  - 60d high distance worse than −30% (likely sustained bear)\n"
+            f"  - 20d realized vol > 60% AND deeply negative (panic, not bounce)\n"
+            f"  - RSI-14 already > 50 (not actually oversold — bad setup)\n"
+            f"\n"
+            f"Otherwise APPROVE. Default to APPROVE for the canonical case "
+            f"(RSI 20–40, drawdown 5–20% from 60d high, vol 20–50%).\n"
             f"\n"
             f"Reply with exactly one of:\n"
             f"  APPROVE — <one short reason>\n"
