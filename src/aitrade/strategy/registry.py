@@ -7,6 +7,7 @@ from collections.abc import Callable
 from aitrade.strategy.base import Strategy
 from aitrade.strategy.examples.bollinger_reversion import BollingerReversion
 from aitrade.strategy.examples.donchian_breakout import DonchianBreakout
+from aitrade.strategy.examples.llm_gated_bollinger import LlmGatedBollinger
 from aitrade.strategy.examples.sma_crossover import SmaCrossover
 from aitrade.strategy.examples.time_series_momentum import TimeSeriesMomentum
 from aitrade.strategy.examples.vix_gated_bollinger import VixGatedBollinger
@@ -20,6 +21,7 @@ _REGISTRY: dict[str, StrategyFactory] = {
     "donchian_breakout": DonchianBreakout,
     "vix_gated_bollinger": VixGatedBollinger,
     "time_series_momentum": TimeSeriesMomentum,
+    "llm_gated_bollinger": LlmGatedBollinger,
 }
 
 

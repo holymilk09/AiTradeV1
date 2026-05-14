@@ -62,6 +62,7 @@ def walk_forward(
     test: pd.Timedelta,
     step: pd.Timedelta | None = None,
     config: BacktestConfig | None = None,
+    warmup: bool = False,
 ) -> WalkForwardSummary:
     """Run a strategy through a rolling walk-forward.
 
@@ -73,6 +74,12 @@ def walk_forward(
         test: test-window duration.
         step: roll size; default = test (non-overlapping test windows).
         config: backtest config.
+        warmup: if True, feed train_bars to the test strategy (without
+            recording trades) before measuring on test_bars. This makes
+            the harness fair to strategies that need a long lookback
+            (e.g. a 252-day momentum lookback can't warm up inside a
+            180-day test window without this). Default False to preserve
+            the original "fresh state per phase" semantics.
     """
     if not bars:
         raise ValueError("no bars")
@@ -100,7 +107,16 @@ def walk_forward(
             continue
 
         train_result = run_backtest(factory(), train_bars, cfg)
-        test_result = run_backtest(factory(), test_bars, cfg)
+        if warmup:
+            # Feed ALL bars prior to test_start, not just train_bars —
+            # gives long-lookback strategies enough history to warm up
+            # before the test window opens.
+            test_strategy = factory()
+            for warm_bar in _slice(bars, series_start, test_start):
+                test_strategy.on_bar(warm_bar)
+            test_result = run_backtest(test_strategy, test_bars, cfg)
+        else:
+            test_result = run_backtest(factory(), test_bars, cfg)
         folds.append(
             Fold(
                 index=idx,
