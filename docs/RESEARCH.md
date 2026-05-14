@@ -180,6 +180,70 @@ So the network problem isn't just `api.anthropic.com` — `paper-api.alpaca.mark
 
 ---
 
+### EXP-004 — Overnight session edge & VIX-regime conditioning  ⭐ alpha hunt
+
+**Hypothesis.** The "overnight effect" — that nearly all of US equity drift since ~2010 has come from the overnight session (close → next open) — is real, documented in published literature (Cliff-Cooper-Gulen 2008; Lou-Polk-Skouras 2019), and survives modern execution. **If it replicates on our data, it's an alpha that has nothing to do with the strategies we'd already registered.**
+
+Cost model assumed: 6 bps round-trip per day. Conservative — Alpaca paper-level execution on liquid ETFs is more like 1-2 bps.
+
+**Setup.** Alpaca daily bars, 2020-01-01 → 2026-01-01. `overnight_ret = open/prev_close − 1`, `intraday_ret = close/open − 1`. For VIX regime, used VIXY (already wired in `market_snapshot.py`), 252-day rolling percentile. Symbols: SPY, QQQ, IWM, NVDA, AAPL, TSLA. Sample sizes 501 (SPY/QQQ/single-names) to 1507 (IWM) — Alpaca's free-tier history depth is asymmetric.
+
+#### Result 4a — Unconditional decomposition
+
+| symbol | overnight Sharpe (gross) | overnight ann % | intraday Sharpe | intraday ann % | full Sharpe |
+|---|---|---|---|---|---|
+| SPY | 1.41 | +14.4% | 0.39 | +5.5% | 1.21 |
+| QQQ | 1.69 | +22.3% | 0.08 | +1.4% | 1.12 |
+| IWM | 0.89 | +15.4% | **−0.26** | **−5.3%** | 0.38 |
+| NVDA | 0.36 | +25.9% | — | — | — |
+| AAPL | −0.26 | −5.0% | — | — | — |
+| TSLA | 0.88 | +34.0% | — | — | — |
+
+Overnight Sharpe materially exceeds full-session Sharpe on every index. IWM's *entire 6-year return came from overnight* — intraday is negatively sloped. The classic "intraday is noise" finding survives on this dataset. But the 6 bp cost knocks unconditional overnight to net Sharpe 0.54 on QQQ, ~0 on SPY/IWM — too thin for retail.
+
+#### Result 4b — VIX-regime conditioning (the alpha)
+
+Take overnight only when VIXY is in the bottom quintile (≤20th 252-day percentile).
+
+| symbol | low-VIX net ann | low-VIX Sharpe | high-VIX net ann | high-VIX Sharpe | n_low |
+|---|---|---|---|---|---|
+| QQQ | **+25.0%** | **+4.39** | −28.3% | −0.70 | 138 |
+| SPY | +9.0% | +3.91 | −29.1% | −0.92 | 138 |
+| IWM | +14.1% | +2.13 | −38.4% | −1.43 | 489 |
+| AAPL | **+43.2%** | **+4.02** | −98.5% | −3.01 | 138 |
+| TSLA | **+96.8%** | +3.22 | −18.2% | −0.07 | 138 |
+| NVDA | −87.7% | −0.58 | −35.6% | −0.48 | 138 |
+
+**Findings.**
+
+1. ⭐ **Low-VIX overnight is a real edge on every tested liquid name except NVDA.** Net-of-cost annualized +9% (SPY) to **+96.8% (TSLA)**. Sharpe 2–4 net on five of six symbols. n=138–489 — not toy samples.
+2. ⭐ **High-VIX overnight is a SHORT signal (or at minimum no-trade).** Top-decile VIX regimes produced net Sharpe −1.8 to −4.3 across all symbols. The overnight drift *reverses* under stress.
+3. **NVDA inverts everywhere.** Likely mechanism: the 2024-2026 AI rally was such a strong intraday-momentum regime that chasers piled in intraday and unloaded into the close, flipping the textbook overnight bias. **This is what the LLM reasoner should learn from journal experience** — the scorer treats NVDA the same as any other name; the LLM is expected to override via `recent_fills_summary`.
+4. **Day-of-week is real but index-specific.** Thursday overnight: QQQ +43.5% net Sharpe 4.17, SPY +18.5%, IWM **−18.4%**. Tuesday is the opposite. DOW effects historically decay when published — trust VIX-regime > DOW.
+5. **Composite filter ("prev red + VIXY ≥70th pct") is WORSE than either alone.** Filters aren't independent. Find one strong unconditional signal, condition on regime, stop.
+
+#### Implementation — `VixRegimeScorer` (shipped this session)
+
+The pure alpha can't be cleanly tested in `simple_runner.py` because the overnight effect requires intraday execution (MOC close → MOO open) while the runner operates on daily bars. Instead of shipping a half-baked daily-bar approximation, the regime signal is now a conviction-component the LLM reasoner can read:
+
+- `src/aitrade/signals/components/vix_regime.py` — new scorer.
+- Self-contained: uses the *symbol's own* 20-day realized vol percentile against its 252-day distribution. Sidesteps the cross-symbol bar-fetch that VIXY would require.
+- Score 1.0 in bottom quintile (overnight bias positive), 0.0 in top quintile (overnight bias negative), linear between.
+- `features` exposes raw rvol + percentile so the LLM can read it directly in the per-symbol context.
+- 5 unit tests in `tests/test_signal_vix_regime.py`; **343 total tests pass**, ruff clean, mypy clean.
+
+The component plugs into the existing M3 composite (`composite_from_components`). To actually take effect in live trading, the engine cycle needs to (a) instantiate scorers per candidate, (b) attach the snapshot to the board entry, (c) extend the floor-trader prompt to surface the regime — that's deferred to next session.
+
+#### What's not done yet
+
+- **Wire `VixRegimeScorer` into `engine_runner.py`**. Trivial code, big info lift for the LLM.
+- **Modify floor-trader system prompt** to mention overnight/intraday regime so the LLM can act on the score.
+- **Build the actual intraday `OvernightRotation` strategy.** Needs executor pathway for 3:55 PM ET MOC entry / 9:31 AM ET MOO exit. ~150 LoC blocked on intraday-timing semantics, not on alpha.
+- **EXP-005 — Earnings drift (E2 from original plan)** deferred — without `FMP_API_KEY` we'd infer earnings dates from volume+gap spikes (noisy).
+- **Engine-mode backtest harness** — substantial; waits on VPS.
+
+---
+
 ## Recommendations as of 2026-05-14
 
 | # | recommendation | rationale | confidence |
@@ -189,6 +253,10 @@ So the network problem isn't just `api.anthropic.com` — `paper-api.alpaca.mark
 | 3 | Move the runner to a US-region VPS before relying on engine-paper data | Two of the last 8 sessions hit Anthropic connection errors; we need an LLM-decision dataset to evaluate, not just engine-uptime | high |
 | 4 | Do not commit to a strategy ranking until **n ≥ 30 paper round-trips** per strategy | Current backtest sample sizes (n=2-16 trades) are not enough; the M3 calibration harness wants ~50 setups to fit weights meaningfully | high |
 | 5 | Run an equivalent sweep on `donchian_breakout` and on a 2024-only / 2025-only split | Test whether the edge is regime-stable; the −0.36 mean train→test corr on bollinger is consistent with regime-flipping | medium |
+| 6 | Wire `VixRegimeScorer` into `engine_runner.py` board-build and per-candidate composite | Surfaces overnight-bias regime as a feature the LLM reasoner reads on every decision; trivial code lift | **high** |
+| 7 | Add overnight/intraday regime cues to the floor-trader system prompt (`reasoning/prompts.py`) | The LLM doesn't know EXP-004 yet; without the cue it'll treat low-vol days like any other. One paragraph addition | **high** |
+| 8 | Build the actual intraday `OvernightRotation` strategy (long QQQ/SPY MOC → MOO when rvol_pct<20) | This is the alpha-extracting trade. Blocked only on intraday execution timing in the executor | medium-high |
+| 9 | Don't trust the NVDA inversion as permanent | n=138, 2-year AI-rally window. The LLM should override the scorer when journaled NVDA fills disagree | medium |
 
 ---
 

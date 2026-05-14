@@ -5,6 +5,7 @@ from aitrade.signals.components.llm_reasoning import LlmReasoningScorer
 from aitrade.signals.components.ml_signal import MlSignalScorer
 from aitrade.signals.components.pattern_match import PatternMatchScorer
 from aitrade.signals.components.quant_edge import QuantEdgeScorer
+from aitrade.signals.components.vix_regime import VixRegimeScorer
 
 __all__ = [
     "LlmReasoningScorer",
@@ -13,4 +14,5 @@ __all__ = [
     "QuantEdgeScorer",
     "Scorer",
     "ScoringContext",
+    "VixRegimeScorer",
 ]
