@@ -372,6 +372,103 @@ Three back-to-back walk-forward runs of base bollinger on AAPL produced **bit-id
 
 ---
 
+### EXP-007 — Strategy leaderboard (head-to-head, all 4 registered strategies)
+
+**Brief from operator.** "We haven't been backtesting to see what works best for consistent results." Fair — every prior EXP either tested one strategy or compared variants. This run produces a single, decisive head-to-head across all currently-registered strategies on the same panel.
+
+**Setup.** 8-symbol panel × all 4 strategies × daily walk-forward 180d/180d on 2024-01-01 → 2026-01-01. Rank score = `panel_mean_sharpe / max(panel_std_sharpe, 0.1)` — rewards strategies with high mean *and* tight cross-symbol consistency.
+
+**Leaderboard:**
+
+| rank | strategy | panel mean Sharpe | std | pass | trades | mean expect | rank_score |
+|---|---|---|---|---|---|---|---|
+| 1 | **bollinger_reversion** | **+1.13** | 0.53 | **7/8** | 65 | **+$282.5** | **+2.14** |
+| 2 | vix_gated_bollinger | +0.66 | 0.55 | 2/8 | 39 | +$41.7 | +1.20 |
+| 3 | donchian_breakout | +0.49 | 0.41 | 1/8 | 41 | **−$137.3** | +1.19 |
+| 4 | sma_crossover | +0.64 | 0.55 | 3/8 | 38 | **−$123.5** | +1.17 |
+
+**Findings.**
+
+1. ⭐ **bollinger_reversion is the only viable edge.** rank_score 2.14 vs 1.17–1.20 for the rest — nearly 2× the next best. The only strategy with positive panel expectancy.
+2. ❌ **donchian and sma have NEGATIVE mean expectancy across the panel.** −$137 and −$124 per trade respectively. The single-symbol donchian-on-AAPL result that looked OK in EXP-001 (Sharpe 1.06) was misleading — 1/8 symbols passing isn't an edge, it's a coincidence. Same for sma.
+3. ⚠️ **vix_gated_bollinger underperforms unfiltered bollinger.** Confirms EXP-005: gating the wrong mechanism reduces an edge that was working.
+4. **donchian has the tightest std** (0.41), but mean is so low that consistency around mediocrity doesn't help. Rank score still beats sma only narrowly.
+
+**Decisive recommendations.**
+
+| # | action | rationale |
+|---|---|---|
+| **A** | **Make bollinger_reversion the only strategy in active rotation.** Demote donchian_breakout and sma_crossover to "reference" status — keep the code (it's compact, illustrative), don't run them on live universe | They lose money per trade across the panel. Single-symbol wins don't survive cross-section. |
+| B | Keep vix_gated_bollinger as a study artifact only | EXP-005 conclusion stands |
+| C | Future strategy adds must clear bollinger's panel benchmark before joining active rotation | rank_score > 1.5, panel mean expect > 0, pass rate ≥ 5/8 |
+| D | The next research target isn't a new strategy — it's *adapting* bollinger's bad-fit symbol (AMD) by adding a trender-filter to the universe | 7/8 → 8/8 panel pass by construction |
+
+---
+
+## Dashboard audit and redesign — 2026-05-14
+
+Operator brief: "Right now dashboard is bloated and not organized. Not providing any real visual edge."
+
+#### What's bloated (current 8 tabs)
+
+| tab | purpose | verdict |
+|---|---|---|
+| `/overview` | account, today, positions, recent decisions, round-trips | **keep — promote to single primary page** |
+| `/live` | live positions + engine state | merge into `/` |
+| `/strategies` | registered strategies + tunables | **demote** — read-only static; could be one row in settings drawer |
+| `/screener` | discovery board | **keep, secondary** — useful during market hours |
+| `/correlations` | clustermap | **demote** — once-a-week glance, not a daily tab |
+| `/history` | closed round-trips | merge into `/journal` |
+| `/logs` | raw journal tail | merge into `/journal` (collapsible debug pane) |
+| `/chat` | Claude chat | **keep, secondary** |
+
+#### What's missing (no visual edge today)
+
+The dashboard does not show:
+1. **Equity curve chart** — the single most important visual on any trading dashboard. We don't have one.
+2. **Drawdown chart / current DD%** — required to know if we're in a drawdown or recovered.
+3. **Daily P&L bar chart** — last 30 days, instantly visible distribution of wins/losses.
+4. **Symbol concentration** — what fraction of equity is in one name? Risk visualization.
+5. **Trade-rate sparkline** — engine producing too many trades, too few? Hard to tell from a list.
+
+#### Proposed structure (3 pages instead of 8)
+
+```
+/                       MAIN — full trading-floor view
+  Top strip: NAV | Today P&L $/% | Open positions | Engine state
+  Hero chart: Equity curve (30/90/all) with drawdown overlay
+  Two-column grid:
+    L:  Open positions table (qty, entry, mkt val, unreal P&L)
+        Recent decisions stream (last 5, ticker + thesis + conf)
+    R:  Trade rate sparkline (last 30d)
+        P&L by symbol bar (concentration)
+        Recent round-trips (last 5, P&L colored)
+  Footer: kill-switch + flatten + reconcile buttons (already there)
+
+/research               SECONDARY — when you want to dig in
+  Screener (discovery board, live + filterable)
+  Correlations heatmap
+  Strategy params (read-only line, link to /settings)
+
+/journal                FORENSICS — when something went wrong
+  Filter: event_type | symbol | time range
+  Default view: closed round-trips with thesis
+  Drill-down: full event payload (collapsed JSON)
+
+/chat                   (existing, untouched)
+```
+
+#### Implementation cost
+
+- New chart library: choose between Chart.js (lightweight, FastAPI-template-friendly), uPlot (fastest, ugly), or a server-side rendered SVG (no JS dep). Recommend **uPlot** — it's tiny (45KB), fast, matches the data density a trader wants.
+- New endpoint: `/api/equity_curve?days=30` returning `[(ts, equity)]` from the journal. Maybe ~50 lines.
+- New endpoint: `/api/trade_rate?days=30` returning a daily count.
+- Template refactor: `/` becomes the single-page operator view; `/live`, `/strategies`, `/correlations` deprecated as separate tabs.
+
+**Defer to next turn for implementation** unless operator wants it sooner.
+
+---
+
 ## Open questions (next session)
 
 - Does the bollinger ridge hold on the 5-min timeframe? Walk-forward harness supports it.
