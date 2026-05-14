@@ -162,6 +162,22 @@ Until those are met, the LLM-in-loop data we'd need to evaluate edge from the re
 - `scripts/atr` — local-dev wrapper that defends against the macOS UF_HIDDEN .pth quirk
 - `scripts/sweep_bollinger.py` — parameter grid script (reusable for other strategies)
 
+**Session-end post-mortem (1h, 4 cycles ran, exit code 0):**
+
+| cycle | result |
+|---|---|
+| 14:33 | stale bars dropped → reasoner Connection error → skip |
+| 14:49 | stale bars dropped → reasoner Connection error → skip |
+| 15:05 | stale bars dropped → reasoner Connection error → skip |
+| 15:22 | stale bars dropped → reasoner Connection error → skip |
+| 15:39 | **Alpaca `Connection reset by peer`** raised mid-cycle → engine caught + continued → duration limit hit → clean exit |
+
+So the network problem isn't just `api.anthropic.com` — `paper-api.alpaca.markets` also reset the connection on cycle 5. The operator's outbound to *any* US API endpoint is intermittent. **The engine resilience code (commit `0a70b9b`) worked perfectly** — every error caught, every cycle continued. The runner is robust, the network underneath it is not.
+
+**What did get written to the journal**: 4 × `discovery_scan` + 4 × `market_snapshot` + 4 × `candidate_board` + 1 × `run_end` = 13 events. **Zero `floor_trader_decision` events.** Discovery, scoring, board ranking all produced output every cycle; only the LLM picker failed. So we know the engine pipeline works up to the reasoner step on this network — and we have a hard floor on how much LLM-decision data we can collect from this location: **zero**.
+
+**Implication for next steps**: the VPS migration (`scripts/vps_bootstrap.sh` + `ops/VPS.md`) is now blocking — without it we can't generate the dataset that calibration would need to actually adapt the system.
+
 ---
 
 ## Recommendations as of 2026-05-14
