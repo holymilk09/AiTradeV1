@@ -260,6 +260,66 @@ The component plugs into the existing M3 composite (`composite_from_components`)
 
 ---
 
+### EXP-005 — Consistency hunt: GitHub-trading-agent recon + VIX-gating ablation
+
+**Brief from operator:** "look up trading agents on github for better trading tool, then test and test until we get some consistency." Two phases: (1) recon GitHub for state-of-the-art multi-agent trading frameworks, (2) test repeatedly until results are stable.
+
+#### Recon — what's out there
+
+| project | what they do | what we already have | what to borrow |
+|---|---|---|---|
+| **TradingAgents** (TauricResearch, arxiv 2412.20138) | LangGraph multi-agent: fundamentals + sentiment + news + technical analysts → bull/bear researcher debate → trader → risk → portfolio manager | DiscoveryAgent (sentiment-ish), pattern detectors (technical), DeepDigger (bull+bear in one call), FloorTrader (trader+PM) | Structured **bull vs bear debate** as two separate LLM calls instead of one monologue verdict — testable when on VPS |
+| **ai-hedge-fund** (virattt, 51k stars) | 19 specialist agents incl. famous-investor personas (Buffett, Munger, Wood, Burry) + Risk Manager + Portfolio Manager | Single FloorTrader doing both trader and PM roles | Famous-investor persona prompts as **alternative system prompts** the engine could rotate through for diverse opinions |
+
+**Both projects explicitly acknowledge non-determinism**: TradingAgents docs say results "vary based on backbone LLM, temperature, period, data quality, and other non-deterministic factors." That's an *industry-wide* unsolved problem, not just ours. Our edge: aggressive journaling means we can *measure* the variance over time and fit calibration weights to it (M3 harness exists).
+
+#### Hypothesis tested
+
+EXP-004 showed VIX regime is a strong overnight-trade conditioner. **Would the same regime filter improve `bollinger_reversion`'s cross-symbol consistency?** Built `VixGatedBollinger` (entry-gated, exit always passes) and compared against base on the 8-symbol panel at three thresholds.
+
+#### Determinism check
+
+Three back-to-back walk-forward runs of base bollinger on AAPL produced **bit-identical metrics** (Sharpe 1.337954, expectancy 335.650371, 7 trades). The backtest path itself has zero non-determinism — no LLM, no random sampling, deterministic stdev. ✓
+
+#### Cross-symbol consistency (panel std of test_sharpe_mean — lower is more consistent)
+
+| config | panel mean Sharpe | panel std | rubric pass | total trades | mean expect |
+|---|---|---|---|---|---|
+| **BASE bollinger (20, 1.5)** | **+1.13** | 0.53 | **7/8** | **65** | **+$282.5** |
+| GATED rvol_pct_max=70 | +0.75 | 0.51 | 2/8 | 43 | +$145.4 |
+| GATED rvol_pct_max=50 | +0.66 | 0.55 | 2/8 | 39 | +$41.7 |
+| GATED rvol_pct_max=30 | +0.37 | 0.39 | 1/8 | 8 | +$127.9 |
+
+#### Findings
+
+1. ❌ **VIX gating MADE bollinger worse on every metric except trade count.** Mean Sharpe dropped from 1.13 → 0.37–0.75 across thresholds. Cross-symbol std didn't improve except at the most extreme threshold (30%), and that was achieved by trading almost nothing (8 total trades on 8 symbols).
+
+2. ✅ **The mechanism is now understood.** Mean reversion *needs* dispersion to fire. High-vol regimes are when the strategy has its richest setups (close prints further below the lower band more frequently). Filtering for low-vol *removes the regime in which the strategy has the most edge*. The VIX gate is a tool for the **overnight-risk-premium** trade, not for mean reversion. Applying it indiscriminately was structural.
+
+3. ✅ **Base bollinger is already strikingly consistent.** 7/8 panel symbols pass the rubric (mean Sharpe > std), AMD is the lone failure (−0.04). The whole panel std is dragged up by AMD's anomaly; excluding it, panel std drops to ~0.27 and mean to ~1.30. AMD's structure (strong trender, low mean-reversion content over 2024-2026) doesn't fit the strategy — that's a *strategy-symbol mismatch* problem, not a parameter problem.
+
+4. ✅ **Determinism is solid.** The simple_runner + walk_forward path has no stochasticity. Any future non-determinism would come from network calls (e.g., bar-fetch retries) or LLM calls, both of which are out-of-band.
+
+#### Conclusions for the consistency goal
+
+- **The most consistent edge we have today is `bollinger_reversion` at (period=20, num_std=1.5)**: 7/8 symbols pass, mean Sharpe 1.13, panel-std 0.53. Determinism: confirmed.
+- **The right "more consistency" improvement is NOT a regime gate.** It's either: (a) symbol-class filtering (don't run mean reversion on clean trenders like AMD), or (b) running on a higher-frequency timeframe where the n grows fast enough to tighten the per-fold stdev.
+- **The right "different edge" lift is to wire the overnight-rotation trade as a separate registered strategy** — that's where the VIX gate belongs, on the trade where the underlying mechanism is risk-premium-for-gap.
+
+#### Artifacts
+
+- `src/aitrade/strategy/examples/vix_gated_bollinger.py` — kept in registry as a study artifact / reference implementation of the gating pattern. Documented in the docstring that it underperforms base bollinger; not recommended for use.
+- `tests/test_strategy_vix_gated_bollinger.py` — 5 tests covering the gate path, exit-always-passes invariant, validation, and memory bound.
+- `scripts/research/consistency_test.py` — reproducible side-by-side panel + determinism check.
+
+#### What the GitHub recon would let us try later (not in this turn)
+
+- **Structured bull/bear debate** (TradingAgents) as two LLM calls. Could replace `DeepDigger`'s single-verdict format. Costs 2× tokens but is rumored to produce more robust calls in adversarial settings.
+- **Famous-investor persona prompts** (ai-hedge-fund) as an alternative system prompt rotation. Could be used in a multi-opinion ensemble where the engine consults Buffett-style, Burry-style, Druckenmiller-style personas and synthesizes.
+- **Both require VPS** for live LLM dataset generation.
+
+---
+
 ## Open questions (next session)
 
 - Does the bollinger ridge hold on the 5-min timeframe? Walk-forward harness supports it.
