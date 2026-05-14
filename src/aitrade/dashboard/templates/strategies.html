@@ -1,0 +1,70 @@
+{% extends "_layout.html" %}
+{% block content %}
+
+<h1>Strategies</h1>
+<p class="page-sub">▸ Registered strategies + realized round-trip performance</p>
+
+<h2>Registered</h2>
+<div class="grid cols-3">
+  {% for name, desc in registered %}
+    <div class="cell">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+        <span class="amber" style="font-weight:700; font-size:13px;">{{ name|upper }}</span>
+        <span class="tag {{ 'cyan' if name in active_strategies else '' }}">
+          {{ 'ACTIVE' if name in active_strategies else 'IDLE' }}
+        </span>
+      </div>
+      <div class="small dim">{{ desc }}</div>
+    </div>
+  {% endfor %}
+  <div class="cell">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+      <span class="amber" style="font-weight:700; font-size:13px;">FLOOR_TRADER</span>
+      <span class="tag {{ 'cyan' if 'floor_trader' in active_strategies else '' }}">
+        {{ 'ACTIVE' if 'floor_trader' in active_strategies else 'IDLE' }}
+      </span>
+    </div>
+    <div class="small dim">
+      Claude Opus picks 1 trade per cycle from the candidate board, with
+      bracket exits and dynamic ATR stops.
+    </div>
+  </div>
+</div>
+
+<h2>Realized · per strategy</h2>
+<div class="cell tight">
+{% if stats %}
+  <table>
+    <thead><tr>
+      <th>STRATEGY</th>
+      <th class="right">N</th>
+      <th class="right">WINS</th>
+      <th class="right">LOSSES</th>
+      <th class="right">WIN RATE</th>
+      <th class="right">TOTAL P&L</th>
+      <th class="right">AVG / TRADE</th>
+    </tr></thead>
+    <tbody>
+    {% for s in stats %}
+      <tr>
+        <td class="amber"><strong>{{ s.strategy_id }}</strong></td>
+        <td class="right num">{{ s.n_trades }}</td>
+        <td class="right green num">{{ s.n_wins }}</td>
+        <td class="right red num">{{ s.n_losses }}</td>
+        <td class="right num">{{ "%.0f%%"|format(s.win_rate * 100) }}</td>
+        <td class="right num {{ 'green' if s.total_pnl_usd > 0 else 'red' }}">
+          {{ s.total_pnl_usd | money }}
+        </td>
+        <td class="right num {{ 'green' if s.avg_pnl_usd > 0 else 'red' }}">
+          {{ s.avg_pnl_usd | money }}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <div class="empty">NO ROUND-TRIPS YET — STATS APPEAR ONCE TRADES CLOSE</div>
+{% endif %}
+</div>
+
+{% endblock %}

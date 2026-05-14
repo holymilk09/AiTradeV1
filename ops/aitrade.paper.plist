@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  aitrade.paper launchd job.
+
+  Install:
+    cp ops/aitrade.paper.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/aitrade.paper.plist
+
+  Stop / uninstall:
+    launchctl unload ~/Library/LaunchAgents/aitrade.paper.plist
+
+  Edit AITRADE_HOME, the strategy name, and the symbol before loading.
+  Stdout / stderr land in $AITRADE_HOME/logs/launchd.paper.{out,err}.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aitrade.paper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>cd "$AITRADE_HOME" &amp;&amp; /opt/homebrew/bin/uv run aitrade paper sma_crossover --symbol AAPL --duration 8h --timeframe 1Min --notional 2000</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>AITRADE_HOME</key>
+        <string>/Users/CHANGE_ME/AiTradeV1</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/CHANGE_ME/AiTradeV1</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/CHANGE_ME/AiTradeV1/logs/launchd.paper.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/CHANGE_ME/AiTradeV1/logs/launchd.paper.err</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

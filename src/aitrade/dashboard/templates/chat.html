@@ -1,0 +1,61 @@
+{% extends "_layout.html" %}
+{% block content %}
+
+<h1>Chat</h1>
+<p class="page-sub">▸ Talk to the bot · current state injected per turn</p>
+
+{% if not has_api_key %}
+  <div class="cell amber" style="margin-bottom:14px;">
+    <strong class="amber">⚠ ANTHROPIC_API_KEY MISSING</strong>
+    <span class="small dim">— set it in <span class="cyan">.env</span> to enable chat</span>
+  </div>
+{% endif %}
+
+<div class="cell">
+  <div class="chat-thread" id="chat">
+    {% if not history %}
+      <div class="empty" style="border:none;">
+        TRY: "HOW IS MY PAPER ACCOUNT DOING?" ·
+        "WHAT DID THE BOT DECIDE LAST CYCLE?" ·
+        "WHY IS THE FLOOR-TRADER PASSING ON AAPL?"
+      </div>
+    {% endif %}
+    {% for m in history %}
+      <div class="msg {{ m.role }}">
+        <div class="who">{{ m.role|upper }}</div>
+        {{ m.content }}
+      </div>
+    {% endfor %}
+  </div>
+
+  <form action="/chat" method="post" class="chat-input">
+    <textarea
+      name="message"
+      placeholder="ASK THE BOT ANYTHING…"
+      {{ 'disabled' if not has_api_key else '' }}>{{ '' }}</textarea>
+    <button class="btn amber" type="submit" {{ 'disabled' if not has_api_key else '' }}>
+      ▸ SEND
+    </button>
+  </form>
+
+  {% if history %}
+    <form action="/chat/clear" method="post" style="margin-top:8px;">
+      <button class="btn sm" type="submit">CLEAR THREAD</button>
+    </form>
+  {% endif %}
+</div>
+
+<p class="vmuted xs" style="margin-top:14px;">
+  ▸ EVERY TURN INJECTS: ACCOUNT · OPEN POSITIONS · LAST 5 DECISIONS ·
+  LAST 5 ROUND-TRIPS · CURRENT MARKET SNAPSHOT
+</p>
+
+<script>
+  // Auto-scroll the chat thread to the latest message.
+  (function() {
+    const t = document.getElementById('chat');
+    if (t) t.scrollTop = t.scrollHeight;
+  })();
+</script>
+
+{% endblock %}

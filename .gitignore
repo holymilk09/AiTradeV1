@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Data + runtime — root-scoped so src/aitrade/data/ and src/aitrade/logging/
+# aren't accidentally excluded.
+/data/
+/logs/
+notebooks/.ipynb_checkpoints/
+*.sqlite
+*.db
+*.parquet
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# uv
+.uv/
+
+# Secrets
+*.pem
+*.key
+secrets/

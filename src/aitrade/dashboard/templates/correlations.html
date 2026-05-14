@@ -1,0 +1,111 @@
+{% extends "_layout.html" %}
+{% block content %}
+
+<h1>Correlations</h1>
+<p class="page-sub">▸ Pairwise ρ across recent candidates + held positions · stacking-risk lens</p>
+
+{% if not payload %}
+  <div class="empty">NO CORRELATION MATRIX YET — RUN THE ENGINE</div>
+{% else %}
+  <h2>
+    Matrix
+    <span class="dim xs" style="font-weight:400; text-transform:none; letter-spacing:0;">
+      · {{ symbols|length }} symbols
+      {% if built_at %}· built {{ built_at | ago }}{% endif %}
+    </span>
+  </h2>
+
+  <div class="cell tight" style="overflow-x:auto;">
+    <table style="border-collapse:separate; border-spacing:0;">
+      <thead>
+        <tr>
+          <th></th>
+          {% for sym in symbols %}
+            <th class="right" style="font-weight:700; padding:4px 6px;
+                {{ 'color:var(--amber);' if sym in held else '' }}">
+              {{ sym }}
+            </th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row_sym in symbols %}
+          <tr>
+            <td style="font-weight:700; padding:4px 8px;
+                {{ 'color:var(--amber);' if row_sym in held else 'color:var(--text);' }}">
+              {{ row_sym }}
+            </td>
+            {% for col_sym in symbols %}
+              {% set rho = matrix_get(row_sym, col_sym) %}
+              <td class="num" style="text-align:center; padding:6px 8px;
+                  font-size:11px; min-width:56px;
+                  background: {{ rho_color(rho) }};
+                  color: {{ rho_text_color(rho) }};">
+                {% if rho is none %}—{% else %}{{ "%+.2f"|format(rho) }}{% endif %}
+              </td>
+            {% endfor %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="vmuted xs" style="margin-top:8px;">
+    ▸ DIAGONAL = 1 (SELF). DARK BLUE = HIGHLY POSITIVE. WHITE = UNCORRELATED.
+    DARK RED = INVERSE. AMBER LABELS = HELD POSITIONS.
+  </p>
+
+  <h2>High-correlation pairs · |ρ| &gt; 0.7</h2>
+  <div class="cell tight">
+  {% if hot_pairs %}
+    <table>
+      <thead><tr>
+        <th>SYM A</th>
+        <th>SYM B</th>
+        <th class="right">ρ</th>
+        <th>FLAG</th>
+      </tr></thead>
+      <tbody>
+      {% for a, b, rho in hot_pairs %}
+        <tr>
+          <td class="amber"><strong>{{ a }}</strong></td>
+          <td class="amber"><strong>{{ b }}</strong></td>
+          <td class="right num {{ 'red' if rho < 0 else 'cyan' }}">
+            {{ "%+.3f"|format(rho) }}
+          </td>
+          <td>
+            {% if a in held or b in held %}
+              <span class="tag red">STACKED W/ POSITION</span>
+            {% else %}
+              <span class="tag">CLUSTERED</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty">NO PAIRS WITH |ρ| &gt; 0.7 — UNIVERSE IS WELL-DIVERSIFIED</div>
+  {% endif %}
+  </div>
+
+  {% if insufficient %}
+    <h2>Insufficient overlap · ρ undefined</h2>
+    <div class="cell tight">
+      <p class="small dim">
+        These pairs have fewer than 30 overlapping return points so ρ would
+        be statistical noise. Treated as 0 penalty.
+      </p>
+      <table>
+        <thead><tr><th>SYM A</th><th>SYM B</th></tr></thead>
+        <tbody>
+        {% for a, b in insufficient %}
+          <tr><td class="dim">{{ a }}</td><td class="dim">{{ b }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+{% endif %}
+
+{% endblock %}

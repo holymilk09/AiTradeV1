@@ -1,0 +1,153 @@
+{% extends "_layout.html" %}
+{% block content %}
+
+<h1>Overview</h1>
+<p class="page-sub">▸ Account · today · open positions · recent decisions · round-trips</p>
+
+{# ============================== KPI STRIP ============================== #}
+<div class="grid cols-4">
+  <div class="cell kpi">
+    <div class="label">▸ EQUITY</div>
+    <div class="value lg">{{ account.equity | money if account else '—' }}</div>
+    <div class="sub">{{ account.currency if account else 'no broker' }}</div>
+  </div>
+  <div class="cell kpi">
+    <div class="label">▸ CASH / BUYING POWER</div>
+    <div class="value">{{ account.cash | money if account else '—' }}</div>
+    <div class="sub">BP {{ account.buying_power | money if account else '—' }}</div>
+  </div>
+  <div class="cell kpi">
+    <div class="label">▸ REALIZED P&L · TODAY</div>
+    <div class="value {{ 'green' if today.realized_pnl_today_usd > 0 else ('red' if today.realized_pnl_today_usd < 0 else 'text') }}">
+      {{ today.realized_pnl_today_usd | money }}
+    </div>
+    <div class="sub">{{ today.n_round_trips }} TRIPS CLOSED</div>
+  </div>
+  <div class="cell kpi">
+    <div class="label">▸ W / L · HIT RATE</div>
+    <div class="value text">
+      <span class="green">{{ wins }}</span><span class="vmuted"> / </span><span class="red">{{ losses }}</span>
+    </div>
+    <div class="sub">
+      {% set hr = wins / (wins + losses) if (wins + losses) > 0 else 0 %}
+      {{ '%.0f%%' | format(hr * 100) }} · NET <span class="amber">{{ total_pnl | money }}</span>
+    </div>
+  </div>
+</div>
+
+{# ============================== TODAY ============================== #}
+<h2>Today's activity</h2>
+<div class="grid cols-3">
+  <div class="cell kpi">
+    <div class="label">DECISIONS</div>
+    <div class="value cyan">{{ today.n_decisions }}</div>
+  </div>
+  <div class="cell kpi">
+    <div class="label">ORDERS</div>
+    <div class="value cyan">{{ today.n_orders }}</div>
+  </div>
+  <div class="cell kpi">
+    <div class="label">CLOSED ROUND-TRIPS</div>
+    <div class="value cyan">{{ today.n_round_trips }}</div>
+  </div>
+</div>
+
+{# ========================== OPEN POSITIONS ========================== #}
+<h2>Open positions</h2>
+<div class="cell tight">
+{% if positions %}
+  <table>
+    <thead><tr>
+      <th>SYM</th>
+      <th class="right">QTY</th>
+      <th class="right">AVG ENTRY</th>
+      <th class="right">MKT VAL</th>
+      <th class="right">UNREAL P&L</th>
+    </tr></thead>
+    <tbody>
+    {% for p in positions %}
+      <tr>
+        <td class="amber"><strong>{{ p.symbol }}</strong></td>
+        <td class="right num">{{ "%.2f"|format(p.qty) }}</td>
+        <td class="right num">{{ "%.2f"|format(p.avg_entry_price) }}</td>
+        <td class="right num">{{ p.market_value | money }}</td>
+        <td class="right num {{ 'green' if p.unrealized_pnl > 0 else ('red' if p.unrealized_pnl < 0 else 'dim') }}">
+          {{ p.unrealized_pnl | money }}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <div class="empty">FLAT — NO OPEN POSITIONS</div>
+{% endif %}
+</div>
+
+{# ========================== RECENT DECISIONS ========================== #}
+<h2>Recent decisions</h2>
+<div class="cell">
+{% if recent_decisions %}
+  {% for d in recent_decisions %}
+    <div style="padding: 6px 0; border-bottom: 1px solid var(--border);">
+      <div style="display:flex; align-items:center; gap:10px;">
+        <span class="amber" style="font-weight:700; font-size:13px;">{{ d.symbol or '—' }}</span>
+        {% if d.should_trade %}
+          <span class="tag cyan">{{ (d.direction or '?')|upper }}</span>
+        {% else %}
+          <span class="tag">PASS</span>
+        {% endif %}
+        <span class="dim xs" style="margin-left:auto;">CONF {{ "%.2f"|format(d.confidence or 0) }}</span>
+      </div>
+      <div class="small" style="color:var(--text); margin-top:2px;">
+        {{ d.thesis or d.reason_for_pass or '—' }}
+      </div>
+      <div class="xs vmuted">{{ d.timestamp }}</div>
+    </div>
+  {% endfor %}
+{% else %}
+  <div class="empty">ENGINE HAS NOT REASONED YET</div>
+{% endif %}
+</div>
+
+{# ============================ ROUND-TRIPS ============================ #}
+<h2>Recent round-trips · {{ wins }}W / {{ losses }}L · {{ total_pnl | money }}</h2>
+<div class="cell tight">
+{% if round_trips %}
+  <table>
+    <thead><tr>
+      <th>SYM</th>
+      <th>WHEN</th>
+      <th class="right">ENTRY → EXIT</th>
+      <th class="right">P&L</th>
+      <th class="right">%</th>
+      <th>OUT</th>
+    </tr></thead>
+    <tbody>
+    {% for r in round_trips %}
+      <tr>
+        <td class="amber"><strong>{{ r.symbol }}</strong></td>
+        <td class="dim small">{{ r.exit_ts | ago }}</td>
+        <td class="right num small">
+          {{ "%.2f"|format(r.entry_price) }} → {{ "%.2f"|format(r.exit_price) }}
+        </td>
+        <td class="right num {{ 'green' if r.pnl_usd > 0 else 'red' }}">
+          {{ r.pnl_usd | money }}
+        </td>
+        <td class="right num {{ 'green' if r.pnl_pct > 0 else 'red' }}">
+          {{ r.pnl_pct | pct }}
+        </td>
+        <td>
+          <span class="tag {{ 'green' if r.pnl_bucket == 'WIN' else ('red' if r.pnl_bucket == 'LOSS' else '') }}">
+            {{ r.pnl_bucket }}
+          </span>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <div class="empty">NO CLOSED ROUND-TRIPS YET — RUN THE ENGINE</div>
+{% endif %}
+</div>
+
+{% endblock %}

@@ -1,0 +1,49 @@
+{% extends "_layout.html" %}
+{% block content %}
+
+<h1>Logs</h1>
+<p class="page-sub">▸ Raw event timeline · filter by event type</p>
+
+<form class="filters" method="get" action="/logs">
+  <select name="event_type">
+    <option value="">ALL EVENT TYPES</option>
+    {% for t in event_types %}
+      <option value="{{ t }}" {{ 'selected' if filter_type == t else '' }}>{{ t }}</option>
+    {% endfor %}
+  </select>
+  <button class="btn amber sm" type="submit">▸ APPLY</button>
+  <a class="btn sm" href="/logs">CLEAR</a>
+</form>
+
+<div class="cell tight">
+{% if events %}
+  <table>
+    <thead><tr>
+      <th>WHEN</th>
+      <th>EVENT</th>
+      <th>SYM</th>
+      <th>PAYLOAD</th>
+    </tr></thead>
+    <tbody>
+    {% for ev in events %}
+      <tr>
+        <td class="dim small num">{{ ev.timestamp.strftime('%m/%d %H:%M:%S') }}</td>
+        <td><span class="tag {{ event_pill_class(ev.event_type) }}">{{ ev.event_type }}</span></td>
+        <td class="amber"><strong>{{ ev.symbol }}</strong></td>
+        <td class="xs dim" style="max-width:600px; word-break:break-all;">
+          {{ payload_preview(ev.payload) }}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <div class="empty">NO EVENTS {{ '(MATCHING FILTER)' if filter_type else 'YET' }}</div>
+{% endif %}
+</div>
+
+<p class="vmuted xs" style="margin-top:8px;">
+  ▸ SHOWING {{ events|length }} OF UP TO {{ limit }} EVENTS
+</p>
+
+{% endblock %}
